@@ -169,7 +169,7 @@ export interface DeployConfig {
   postDeploy?: string;
   preSetup?: string;
   postSetup?: string;
-  ssh_options?: string;
+  ssh_options?: string | string[];
   env?: Record<string, string>;
 }
 

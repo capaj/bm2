@@ -90,7 +90,7 @@ BM2 replaces PM2's Node.js internals with Bun-native APIs. It uses `Bun.spawn` f
 
 **Foreground / No-Daemon Mode** — Run BM2 in blocking foreground mode without spawning a background daemon. Designed for containerized environments like Docker, Kubernetes, and any platform that expects PID 1 to remain in the foreground.
 
-**Real-Time Web Dashboard** — A built-in dark-themed web dashboard with live WebSocket updates, CPU/memory charts, process control buttons, and a log viewer. No external dependencies.
+**Real-Time Web Dashboard** — A built-in React dashboard with live WebSocket updates, CPU/memory charts, process control buttons, and a log viewer. All client assets are served locally by BM2.
 
 **Prometheus Metrics** — A dedicated metrics endpoint exports process and system telemetry in Prometheus exposition format, ready for scraping by Prometheus and visualization in Grafana.
 
@@ -865,10 +865,12 @@ This creates the following remote directory structure:
 Deploy a new release.
 
 ```
-bm2 deploy ecosystem.config.json production
+bm2 deploy ecosystem.config.json production --allow-shell-hooks
 ```
 
 The deploy process works as follows. It runs the `preDeploy` hook locally such as running tests. It connects via SSH to each configured host. It pulls the latest code from the configured ref. It creates a new timestamped release directory. It updates the current symlink to the new release. It runs the `postDeploy` hook remotely such as installing dependencies and reloading processes. It cleans up old releases, keeping only the 5 most recent.
+
+Repository URLs, paths, refs, and environment values are passed as shell-quoted data. Shell hooks remain executable programs and are disabled unless the caller passes `--allow-shell-hooks` after reviewing the configuration. The opt-in is deliberately a CLI flag rather than a configuration property, so a configuration cannot grant itself permission to execute hooks. JavaScript and TypeScript ecosystem files are themselves executable when loaded; use JSON for data-only configuration and review executable config files before running them.
 
 Multi-host deployment is supported. Specify an array of hosts to deploy to all of them sequentially:
 
@@ -1208,18 +1210,18 @@ The complete set of options available for each entry in the apps array:
 | `ref` | `string` | Git ref to deploy |
 | `repo` | `string` | Git repository URL |
 | `path` | `string` | Remote deployment path |
-| `preDeploy` | `string` | Command to run locally before deploy |
-| `postDeploy` | `string` | Command to run remotely after deploy |
-| `preSetup` | `string` | Command to run remotely during setup |
-| `postSetup` | `string` | Command to run remotely after setup |
-| `ssh_options` | `string` | Additional SSH options |
+| `preDeploy` | `string` | Trusted local shell command; requires `--allow-shell-hooks` |
+| `postDeploy` | `string` | Trusted remote shell command; requires `--allow-shell-hooks` |
+| `preSetup` | `string` | Trusted remote shell command; requires `--allow-shell-hooks` |
+| `postSetup` | `string` | Trusted remote shell command; requires `--allow-shell-hooks` |
+| `ssh_options` | `string` or `string[]` | Additional SSH options; command-executing options are rejected |
 | `env` | `Record<string, string>` | Environment variables for remote commands |
 
 ---
 
 ## Web Dashboard
 
-The BM2 dashboard is a self-contained web application served directly by the daemon. It requires no external dependencies. The HTML, CSS, JavaScript, and WebSocket server are all built in.
+The BM2 dashboard is a React application bundled by Bun and served directly by the daemon. It uses no CDN or externally hosted runtime assets. React renders process names and log output as text, and the dashboard response applies a Content Security Policy that disallows inline scripts.
 
 ### Dashboard Features
 
@@ -2093,7 +2095,7 @@ Then add the target to your `prometheus.yml` and import the Grafana dashboard.
 ### Zero-Downtime Deploy
 
 ```
-bm2 deploy ecosystem.config.json production
+bm2 deploy ecosystem.config.json production --allow-shell-hooks
 ```
 
 Or manually:

@@ -18,11 +18,32 @@ import { ProcessManager } from "./process-manager";
 import { getDashboardHTML } from "./dashboard-ui";
 import { DASHBOARD_PORT, METRICS_PORT } from "./constants";
 import type { Server, ServerWebSocket } from "bun";
+import { join } from "path";
+
+export async function buildDashboardClient(): Promise<string> {
+  const result = await Bun.build({
+    entrypoints: [join(import.meta.dir, "dashboard-app.tsx")],
+    target: "browser",
+    format: "esm",
+    minify: true,
+    define: {
+      "process.env.NODE_ENV": JSON.stringify("production"),
+    },
+  });
+
+  if (!result.success || !result.outputs[0]) {
+    const details = result.logs.map((log) => log.message).join("\n");
+    throw new Error(`Failed to build the dashboard client${details ? `:\n${details}` : ""}`);
+  }
+
+  return result.outputs[0].text();
+}
 
 export class Dashboard {
 
   private server: Server<unknown> | null = null;
   private metricsServer: Server<unknown> | null = null;
+  private clientBundle: string | null = null;
 
   private clients: Set<ServerWebSocket<unknown>> = new Set();
   private pm: ProcessManager;
@@ -32,7 +53,9 @@ export class Dashboard {
     this.pm = pm;
   }
 
-  start(port: number = DASHBOARD_PORT, metricsPort: number = METRICS_PORT) {
+  async start(port: number = DASHBOARD_PORT, metricsPort: number = METRICS_PORT) {
+    this.clientBundle ??= await buildDashboardClient();
+
     // Dashboard + WebSocket server
     this.server = Bun.serve<unknown>({
       port,
@@ -64,14 +87,49 @@ export class Dashboard {
           });
         }
 
+        if (url.pathname === "/dashboard.js") {
+          return new Response(this.clientBundle, {
+            headers: {
+              "Content-Type": "text/javascript; charset=utf-8",
+              "Cache-Control": "no-store",
+              "X-Content-Type-Options": "nosniff",
+            },
+          });
+        }
+
+        if (url.pathname === "/dashboard.css") {
+          return new Response(Bun.file(join(import.meta.dir, "dashboard.css")), {
+            headers: {
+              "Content-Type": "text/css; charset=utf-8",
+              "X-Content-Type-Options": "nosniff",
+            },
+          });
+        }
+
         // Action endpoints
         if (req.method === "POST") {
           return this.handleAction(url.pathname, req);
         }
 
         // Serve dashboard HTML
+        if (url.pathname !== "/") {
+          return new Response("Not Found", { status: 404 });
+        }
         return new Response(getDashboardHTML(), {
-          headers: { "Content-Type": "text/html" },
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Content-Security-Policy": [
+              "default-src 'self'",
+              "script-src 'self'",
+              "connect-src 'self' ws: wss:",
+              "style-src 'self'",
+              "img-src 'self' data:",
+              "object-src 'none'",
+              "base-uri 'none'",
+              "frame-ancestors 'none'",
+            ].join("; "),
+            "X-Content-Type-Options": "nosniff",
+          },
         });
       },
       websocket: {

@@ -860,9 +860,20 @@ class BM2CLI {
   async cmdDeploy(args: string[]) {
     const configFile = args[0];
     const environment = args[1];
+    const deployArgs = args.slice(2);
+    const setup = deployArgs.includes("setup");
+    const allowShellHooks = deployArgs.includes("--allow-shell-hooks");
+    const unknownArgs = deployArgs.filter(
+      (arg) => arg !== "setup" && arg !== "--allow-shell-hooks"
+    );
 
-    if (!configFile || !environment) {
-      console.error(colorize("Usage: bm2 deploy <config> <environment> [setup]", "red"));
+    if (!configFile || !environment || unknownArgs.length > 0) {
+      console.error(
+        colorize(
+          "Usage: bm2 deploy <config> <environment> [setup] [--allow-shell-hooks]",
+          "red"
+        )
+      );
       process.exit(1);
     }
 
@@ -874,12 +885,12 @@ class BM2CLI {
     }
 
     const deployConfig = config.deploy[environment]!;
-    const deployer = new DeployManager();
+    const deployer = new DeployManager({ allowShellHooks });
 
-    if (args[2] === "setup") {
+    if (setup) {
       await deployer.setup(deployConfig);
     } else {
-      await deployer.deploy(deployConfig, args[2]);
+      await deployer.deploy(deployConfig);
     }
   }
 
@@ -1092,7 +1103,8 @@ class BM2CLI {
     startup [install|remove]      Generate/install startup script
     
     ${colorize("Deploy:", "cyan")}
-    deploy <config> <env> [setup] Deploy using ecosystem config
+    deploy <config> <env> [setup] [--allow-shell-hooks]
+                                  Deploy using ecosystem config
     
     ${colorize("Environment:", "cyan")}
     env set <name> <key> <val>    Set env variable

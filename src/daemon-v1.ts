@@ -179,7 +179,7 @@ async function handleMessage(msg: DaemonMessage): Promise<DaemonResponse> {
       case "dashboard": {
         const port = msg.data?.port || DASHBOARD_PORT;
         const metricsPort = msg.data?.metricsPort || METRICS_PORT;
-        dashboard.start(port, metricsPort);
+        await dashboard.start(port, metricsPort);
         return { type: "dashboard", data: { port, metricsPort }, success: true, id: msg.id };
       }
       case "dashboardStop": {
