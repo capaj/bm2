@@ -556,7 +556,7 @@ export function ProcessTable({
                 const target = event.target;
                 if (
                   target instanceof Element &&
-                  target.closest("a, button")
+                  target.closest("a, button, .actions")
                 ) {
                   return;
                 }
@@ -1214,9 +1214,13 @@ export function DashboardRoutes({
 
 export function DashboardApp() {
   const dashboard = useDashboardSocket();
+  const [currentLocation] = useLocation();
+  const processDetailClass = currentLocation.startsWith("/process/")
+    ? " process-detail-shell"
+    : "";
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${processDetailClass}`}>
       <DashboardHeader updatedAt={dashboard.updatedAt} />
       <DashboardRoutes
         dashboardState={dashboard.dashboardState}
