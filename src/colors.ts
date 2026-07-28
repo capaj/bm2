@@ -1,16 +1,21 @@
+import pc from "picocolors";
+
+const formatters: Record<string, (text: string) => string> = {
+  reset: pc.reset,
+  bold: pc.bold,
+  dim: pc.dim,
+  red: pc.red,
+  green: pc.green,
+  yellow: pc.yellow,
+  blue: pc.blue,
+  cyan: pc.cyan,
+  magenta: pc.magenta,
+  white: pc.white,
+  gray: pc.gray,
+};
 
 export function color(text: string, type: string) {
-  const codes: Record<string, string> = {
-    reset: "\x1b[0m",
-    bold: "\x1b[1m",
-    dim: "\x1b[2m",
-    red: "\x1b[31m",
-    green: "\x1b[32m",
-    yellow: "\x1b[33m",
-    cyan: "\x1b[36m",
-    magenta: "\x1b[35m",
-  };
-  return (codes[type] || "") + text + codes.reset;
+  return formatters[type]?.(text) ?? text;
 }
 
 export function statusColor(status: string): string {

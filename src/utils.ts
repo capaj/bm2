@@ -17,6 +17,7 @@
 import { join } from "path";
 import { ALL_DIRS, BM2_HOME } from "./constants";
 import { mkdir } from "fs/promises";
+import { color } from "./colors";
 
 export const DUMP_FILE = join(BM2_HOME, "dump.json");
 
@@ -62,14 +63,8 @@ export function generateId(): string {
   return crypto.randomUUID().replace(/-/g, "").substring(0, 12);
 }
 
-export function colorize(text: string, color: string): string {
-  const colors: Record<string, string> = {
-    red: "\x1b[31m", green: "\x1b[32m", yellow: "\x1b[33m",
-    blue: "\x1b[34m", magenta: "\x1b[35m", cyan: "\x1b[36m",
-    white: "\x1b[37m", gray: "\x1b[90m", bold: "\x1b[1m",
-    dim: "\x1b[2m", reset: "\x1b[0m",
-  };
-  return `${colors[color] || ""}${text}\x1b[0m`;
+export function colorize(text: string, type: string): string {
+  return color(text, type);
 }
 
 export function padRight(str: string, len: number): string {

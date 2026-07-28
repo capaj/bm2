@@ -44,7 +44,6 @@ import type {
 import { statusColor } from "./colors";
 import { liveWatchProcess, printProcessTable } from "./process-table";
 import Daemon from "./daemon";
-import chalk from "chalk";
 
 // ---------------------------------------------------------------------------
 // Ensure directory structure exists
@@ -649,9 +648,12 @@ class BM2CLI {
     const renderLog = (log: LogItem) => {
       let line;
       if (log.level == "err") {
-        line = chalk.red(`[ERROR] ${log.name} | ${log.ts}: ${log.msg}\n`)
+        line = colorize(`[ERROR] ${log.name} | ${log.ts}: ${log.msg}\n`, "red")
       } else {
-        line = chalk.white(`${chalk.cyan(`[OUTPUT] ${log.name} | ${log.ts}`)}: ${log.msg}\n`)
+        line = colorize(
+          `${colorize(`[OUTPUT] ${log.name} | ${log.ts}`, "cyan")}: ${log.msg}\n`,
+          "white"
+        )
       }
       console.log(line)  
     }
