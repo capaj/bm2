@@ -314,9 +314,16 @@ export class ProcessContainer {
     this.cleanupTimers();
 
     const uptime = Date.now() - this.startedAt;
+    const wasStable = uptime >= this.config.minUptime;
 
-    if (wasOnline && this.config.autorestart && this.restartCount < this.config.maxRestarts) {
-      if (uptime < this.config.minUptime) {
+    if (wasStable) {
+      this.unstableRestarts = 0;
+    }
+
+    if (!wasOnline || !this.config.autorestart) return;
+
+    if (this.unstableRestarts < this.config.maxRestarts) {
+      if (!wasStable) {
         this.unstableRestarts++;
       }
 
@@ -325,13 +332,19 @@ export class ProcessContainer {
 
       this.restartTimer = setTimeout(() => {
         this.restartCount++;
-        console.log(`[bm2] Restarting ${this.name} (attempt ${this.restartCount}/${this.config.maxRestarts})`);
+        console.log(
+          `[bm2] Restarting ${this.name} (restart ${this.restartCount}, ` +
+          `unstable ${this.unstableRestarts}/${this.config.maxRestarts})`
+        );
         this.start().catch((err) => {
           console.error(`[bm2] Failed to restart ${this.name}:`, err);
         });
       }, delay);
-    } else if (this.restartCount >= this.config.maxRestarts) {
-      console.log(`[bm2] ${this.name} reached max restarts (${this.config.maxRestarts}), not restarting`);
+    } else {
+      console.log(
+        `[bm2] ${this.name} reached max consecutive unstable restarts ` +
+        `(${this.config.maxRestarts}), not restarting`
+      );
       this.status = "errored";
     }
   }

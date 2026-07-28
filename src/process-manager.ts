@@ -41,7 +41,12 @@
    DEFAULT_LOG_RETAIN,
  } from "./constants";
 import path from "path";
-import type { ReadableStreamController } from "bun";
+ import type { ReadableStreamController } from "bun";
+
+ interface SavedProcess {
+   config: ProcessDescription;
+   restartCount?: number;
+ }
  
  export class ProcessManager {
    private processes: Map<number, ProcessContainer> = new Map();
@@ -370,7 +375,7 @@ import type { ReadableStreamController } from "bun";
    }
  
    async save(): Promise<void> {
-     const data = Array.from(this.processes.values()).map((p) => ({
+     const data: SavedProcess[] = Array.from(this.processes.values()).map((p) => ({
        config: p.config,
        restartCount: p.restartCount,
      }));
@@ -381,26 +386,28 @@ import type { ReadableStreamController } from "bun";
      try {
        const file = Bun.file(DUMP_FILE);
        if (!(await file.exists())) return [];
-       const data = await file.json();
+       const data = await file.json() as SavedProcess[];
        const states: ProcessState[] = [];
  
        for (const item of data) {
-         const result = await this.start({
-           name: item.config.name,
-           script: item.config.script,
-           args: item.config.args,
-           cwd: item.config.cwd,
-           env: item.config.env,
-           autorestart: item.config.autorestart,
-           maxRestarts: item.config.maxRestarts,
-           watch: item.config.watch,
-           instances: 1,
-           execMode: item.config.execMode,
-           port: item.config.port,
-           healthCheckUrl: item.config.healthCheckUrl,
-         });
-         states.push(...result);
+         const config = item.config;
+         const container = new ProcessContainer(
+           config.id,
+           config,
+           this.logManager,
+           this.clusterManager,
+           this.healthChecker,
+           this.cronManager
+         );
+         container.restartCount = item.restartCount ?? 0;
+
+         this.processes.set(config.id, container);
+         this.nextId = Math.max(this.nextId, config.id + 1);
+         await container.start();
+         states.push(container.getState());
        }
+
+       if (states.length > 0) this.processMonitor.start();
        return states;
      } catch {
        return [];
