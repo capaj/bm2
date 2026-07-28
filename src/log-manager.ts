@@ -15,18 +15,26 @@
  */
 
 import { join, dirname } from "path";
-import { appendFile, rename, unlink, readdir } from "fs/promises";
+import { appendFile, rename, unlink, readdir, stat } from "fs/promises";
 import { LOG_DIR, DEFAULT_LOG_MAX_SIZE, DEFAULT_LOG_RETAIN } from "./constants";
-import type {  LogEntry, LogRotateOptions } from "./types";
-import { watch } from "fs";
+import type { LogEntry, LogItem, LogRotateOptions } from "./types";
 import type { ReadableStreamController } from "bun";
-import { $ } from "bun"
 import { EOL } from 'node:os';
 
 const isoRegex: RegExp = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/;
 
 // [__br__] = linebreak
 const nl = "[__br__]"
+
+interface LogCursor {
+  offset: number;
+  inode: number;
+}
+
+export interface PreparedLogStream {
+  logs: LogItem[];
+  start: (onLog: (log: LogItem) => void) => () => void;
+}
 
 export class LogManager {
   
@@ -58,24 +66,30 @@ export class LogManager {
     }
   }
   
-  async appendJSONLog(filePath: string, msg: string) {
-    
-     msg = msg.trim().replace(/[\r\n]+/g, nl);
-    
-    const log: LogEntry = {
-      ts: new Date().toISOString(),
-      msg
-    };
-  
-    const line = JSON.stringify(log) + "\n";
-  
-    // reuse your buffer system 
-    if (!this.writeBuffers.has(filePath)) {
-      this.writeBuffers.set(filePath, []);
+  appendJSONLog(filePath: string, msg: string): void {
+    this.appendJSONLogs(filePath, [msg]);
+  }
+
+  appendJSONLogs(filePath: string, messages: readonly string[]): void {
+    if (messages.length === 0) return;
+
+    let buffer = this.writeBuffers.get(filePath);
+    if (!buffer) {
+      buffer = [];
+      this.writeBuffers.set(filePath, buffer);
     }
-  
-    this.writeBuffers.get(filePath)!.push(line);
-  
+
+    // All complete lines came from the same pipe read, so one timestamp is
+    // sufficiently precise and avoids a Date allocation for every line.
+    const ts = new Date().toISOString();
+    for (const message of messages) {
+      const log: LogEntry = {
+        ts,
+        msg: message.replace(/[\r\n]+/g, nl),
+      };
+      buffer.push(JSON.stringify(log) + "\n");
+    }
+
     if (!this.flushTimers.has(filePath)) {
       this.flushTimers.set(
         filePath,
@@ -135,95 +149,193 @@ export class LogManager {
     return match?.[0] ?? ""
   }
 
+  private async getCursor(filePath: string): Promise<LogCursor> {
+    try {
+      const fileStat = await stat(filePath);
+      return { offset: fileStat.size, inode: fileStat.ino };
+    } catch {
+      return { offset: 0, inode: 0 };
+    }
+  }
+
+  private async readLogTail(
+    filePath: string,
+    level: "err" | "out",
+    lines: number,
+    endOffset: number
+  ): Promise<LogEntry[]> {
+    if (lines <= 0 || endOffset <= 0) return [];
+
+    const file = Bun.file(filePath);
+    if (!(await file.exists())) return [];
+
+    const chunkSize = 64 * 1024;
+    let startOffset = Math.max(0, endOffset - chunkSize);
+    let text = await file.slice(startOffset, endOffset).text();
+
+    while (
+      startOffset > 0 &&
+      (text.match(/\n/g)?.length ?? 0) <= lines
+    ) {
+      const nextOffset = Math.max(0, startOffset - chunkSize);
+      text =
+        (await file.slice(nextOffset, startOffset).text()) +
+        text;
+      startOffset = nextOffset;
+    }
+
+    let rawLines = text.split(/\r?\n/).filter(Boolean);
+    if (startOffset > 0) rawLines = rawLines.slice(1);
+
+    return rawLines
+      .slice(-lines)
+      .map((line) => this.parseLine(line, level));
+  }
+
+  async prepareLogStream(
+    name: string,
+    id: number,
+    lines: number = 20,
+    customOut?: string,
+    customErr?: string
+  ): Promise<PreparedLogStream> {
+    const paths = this.getLogPaths(name, id, customOut, customErr);
+    const [outCursor, errCursor] = await Promise.all([
+      this.getCursor(paths.outFile),
+      this.getCursor(paths.errFile),
+    ]);
+    const cursors = { out: outCursor, err: errCursor };
+
+    const logs = (await Promise.all([
+      this.readLogTail(paths.outFile, "out", lines, outCursor.offset),
+      this.readLogTail(paths.errFile, "err", lines, errCursor.offset),
+    ]))
+      .flat()
+      .map((log) => ({ name, id, ...log }))
+      .sort((a, b) => (a.ts || "").localeCompare(b.ts || ""))
+      .slice(-lines);
+
+    return {
+      logs,
+      start: (onLog) => this.watchLogPaths(name, id, paths, cursors, onLog),
+    };
+  }
+
+  private watchLogPaths(
+    name: string,
+    id: number,
+    paths: { outFile: string; errFile: string },
+    initialCursors: { out: LogCursor; err: LogCursor },
+    onLog: (log: LogItem) => void
+  ): () => void {
+    const cursors = {
+      out: { ...initialCursors.out },
+      err: { ...initialCursors.err },
+    };
+    const remainders = { out: "", err: "" };
+    let active = true;
+    let polling = false;
+
+    const poll = async () => {
+      if (!active || polling) return;
+      polling = true;
+
+      try {
+        for (const [level, filePath] of [
+          ["out", paths.outFile],
+          ["err", paths.errFile],
+        ] as const) {
+          const nextCursor = await this.getCursor(filePath);
+          const cursor = cursors[level];
+
+          if (
+            nextCursor.inode !== cursor.inode ||
+            nextCursor.offset < cursor.offset
+          ) {
+            cursor.offset = 0;
+            cursor.inode = nextCursor.inode;
+            remainders[level] = "";
+          }
+
+          if (nextCursor.offset === cursor.offset) continue;
+
+          const chunk = await Bun.file(filePath)
+            .slice(cursor.offset, nextCursor.offset)
+            .text();
+          cursor.offset = nextCursor.offset;
+          cursor.inode = nextCursor.inode;
+
+          const pendingLines = (remainders[level] + chunk).split(/\r?\n/);
+          remainders[level] = pendingLines.pop() ?? "";
+
+          for (const line of pendingLines) {
+            if (!active) return;
+            if (!line) continue;
+            try {
+              onLog({ name, id, ...this.parseLine(line, level) });
+            } catch {
+              return;
+            }
+          }
+        }
+      } catch {
+        // A file can be replaced between stat and read during log rotation.
+        // Keep the watcher alive so the next poll can recover from the new file.
+      } finally {
+        polling = false;
+      }
+    };
+
+    const interval = setInterval(() => void poll(), 500);
+    void poll();
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }
+
   async readLogs(
     name: string,
     id: number,
     lines: number = 20,
     customOut?: string,
     customErr?: string
-  ): Promise<LogEntry[]> {
-
-    const paths = this.getLogPaths(name, id, customOut, customErr);
-    
-    const logs = (await Promise.all(Object.values(paths).map(async (fp) => {         
-      
-      const f = Bun.file(fp);
-      if (!(await f.exists())) return [];
-
-      const level = (fp == paths.errFile) ? "err" : "out";
-      
-      const rawLog = await $`tail -n ${lines} ${fp}`.text();
- 
-       return rawLog
-         .split("\n")
-         .filter(Boolean)
-         .map(l => this.parseLine(l, level));
-      
-    }))).flat();
-        
-    // lets sort the logs here 
-    let sortedLogs = logs
-      .sort((a, b) => (a.ts || "").localeCompare(b.ts || ""))
-    
-    if (sortedLogs.length > lines) {
-      sortedLogs = sortedLogs.slice(-lines)
-    }
-    
-    console.log(sortedLogs)
-      
-    return sortedLogs
+  ): Promise<LogItem[]> {
+    const prepared = await this.prepareLogStream(
+      name,
+      id,
+      lines,
+      customOut,
+      customErr
+    );
+    return prepared.logs;
   }
 
   async tailLog(
     name: string,
     id: number,
     streamController: ReadableStreamDefaultController,
-    signal: AbortSignal
+    signal: AbortSignal,
+    customOut?: string,
+    customErr?: string
   ) {
-    const paths = this.getLogPaths(name, id);
-  
-    const state = {
-      out: Bun.file(paths.outFile).size,
-      err: Bun.file(paths.errFile).size,
-    };
-    
-  
-    const poll = setInterval(async () => {
-      for (const [type, fp] of [["out", paths.outFile],["err", paths.errFile],] as const) {
-        
-        const f = Bun.file(fp);
-  
-        if (!(await f.exists())) continue;
-  
-        let lastSize = state[type];
-  
-        const size = f.size;
-  
-        if (size < lastSize) {
-          state[type] = 0; // rotated file
-          lastSize = 0;
-        }
-  
-        if (size === lastSize) continue;
-  
-        const chunk = await f.slice(lastSize, size).text();
-        state[type] = size;
-  
-        for (const line of chunk.split("\n").filter(Boolean)) {
-          try {
-            const log = { name, id, ...this.parseLine(line, type) };
-            streamController.enqueue(`data: ${JSON.stringify(log)}\n\n`);
-          } catch (e: any) {
-            console.log("tailLog: ", e, e.stack)
-            return;
-          }
-        }
-      }
-    }, 500);
-  
-    signal.addEventListener("abort", () => {
-      clearInterval(poll);
+    const prepared = await this.prepareLogStream(
+      name,
+      id,
+      0,
+      customOut,
+      customErr
+    );
+    const stop = prepared.start((log) => {
+      streamController.enqueue(`data: ${JSON.stringify(log)}\n\n`);
     });
+
+    if (signal.aborted) {
+      stop();
+      return;
+    }
+    signal.addEventListener("abort", stop, { once: true });
   }
 
   async rotate(filePath: string, options: LogRotateOptions): Promise<void> {

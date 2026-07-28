@@ -34,6 +34,7 @@ import {
 } from "./constants";
 import type { ProcessUsage } from "./process-monitor";
 
+const MAX_UNTERMINATED_LOG_CHARS = 8 * 1024;
 
 export class ProcessContainer {
   public id: number;
@@ -148,9 +149,12 @@ export class ProcessContainer {
       }
     } catch (err: any) {
       this.status = "errored";
- 
-      await this.logManager.appendJSONLog(logPaths.errFile, `[bm2] Failed to start: ${err.message}`);
-      
+
+      this.logManager.appendJSONLog(
+        logPaths.errFile,
+        `[bm2] Failed to start: ${err.message}`
+      );
+
       throw err;
     }
   }
@@ -221,42 +225,52 @@ export class ProcessContainer {
   private async pipeStream(stream: ReadableStream<Uint8Array>, filePath: string) {
     const reader = stream.getReader();
     const decoder = new TextDecoder();
-
-    
-    // Holds the tail of the last chunk if it did not end on a newline.
-    // Without this, a chunk boundary mid-word (e.g. "hel" / "lo\n") would be
-    // written as two separate log lines, corrupting the output.
     let remainder = "";
 
     try {
       while (true) {
         const { done, value } = await reader.read();
-        
+
         if (done) {
-          // Flush any buffered content that was never terminated with \n
+          remainder += decoder.decode();
           if (remainder.length > 0) {
-            await this.logManager.appendJSONLog(filePath, remainder)
-            remainder = "";
+            this.logManager.appendJSONLog(filePath, remainder);
           }
           break;
         }
 
-        // stream=true tells the decoder to hold multi-byte UTF-8 sequences
-        // that straddle chunk boundaries rather than emitting replacement chars.
-        const chunk = decoder.decode(value, { stream: true });
+        // TextDecoder preserves UTF-8 sequences split across pipe reads, while
+        // remainder preserves logical lines split across those same reads.
+        const text = remainder + decoder.decode(value, { stream: true });
+        const lines = text.split(/\r?\n/);
+        remainder = lines.pop() ?? "";
 
-        // Prepend any leftover from the previous chunk before splitting.
-        // This is a single string allocation per chunk (not per line), so
-        // allocation pressure stays O(chunk size) rather than O(line count).
-        const text = (remainder + chunk).trim();
+        // A process that never emits a newline must not grow daemon memory
+        // indefinitely. Preserve all output as bounded continuation records.
+        while (remainder.length >= MAX_UNTERMINATED_LOG_CHARS) {
+          let end = MAX_UNTERMINATED_LOG_CHARS;
+          const lastCodeUnit = remainder.charCodeAt(end - 1);
+          const nextCodeUnit = remainder.charCodeAt(end);
+          if (
+            lastCodeUnit >= 0xd800 &&
+            lastCodeUnit <= 0xdbff &&
+            nextCodeUnit >= 0xdc00 &&
+            nextCodeUnit <= 0xdfff
+          ) {
+            end--;
+          }
+          lines.push(remainder.slice(0, end));
+          remainder = remainder.slice(end);
+        }
 
-        await this.logManager.appendJSONLog(filePath, text);
+        this.logManager.appendJSONLogs(filePath, lines);
       }
     } catch {
-      // Flush remainder on unexpected stream error
       if (remainder.length > 0) {
-        await this.logManager.appendJSONLog(filePath, remainder).catch(() => {});
+        this.logManager.appendJSONLog(filePath, remainder);
       }
+    } finally {
+      reader.releaseLock();
     }
   }
 

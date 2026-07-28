@@ -74,3 +74,68 @@ describe("ProcessContainer restart budget", () => {
     }
   });
 });
+
+describe("ProcessContainer output framing", () => {
+  test("preserves complete lines across arbitrary UTF-8 pipe chunks", async () => {
+    const batches: string[][] = [];
+    const trailing: string[] = [];
+    const container = Object.assign(Object.create(ProcessContainer.prototype), {
+      logManager: {
+        appendJSONLogs: (_filePath: string, messages: readonly string[]) => {
+          batches.push([...messages]);
+        },
+        appendJSONLog: (_filePath: string, message: string) => {
+          trailing.push(message);
+        },
+      },
+    }) as ProcessContainer;
+    const encoder = new TextEncoder();
+    const chunks = [
+      encoder.encode("  hel"),
+      encoder.encode("lo 🌍\r\nsecond"),
+      encoder.encode(" line\n\nunterminated tail  "),
+    ];
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(chunk);
+        controller.close();
+      },
+    });
+
+    await (container as any).pipeStream(stream, "out.log");
+
+    expect(batches.flat()).toEqual(["  hello 🌍", "second line", ""]);
+    expect(trailing).toEqual(["unterminated tail  "]);
+  });
+
+  test("bounds newline-free output without dropping content", async () => {
+    const messages: string[] = [];
+    const container = Object.assign(Object.create(ProcessContainer.prototype), {
+      logManager: {
+        appendJSONLogs: (_filePath: string, batch: readonly string[]) => {
+          messages.push(...batch);
+        },
+        appendJSONLog: (_filePath: string, message: string) => {
+          messages.push(message);
+        },
+      },
+    }) as ProcessContainer;
+    const content = "🌍".repeat(50_000);
+    const encoded = new TextEncoder().encode(content);
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let offset = 0; offset < encoded.length; offset += 997) {
+          controller.enqueue(encoded.slice(offset, offset + 997));
+        }
+        controller.close();
+      },
+    });
+
+    await (container as any).pipeStream(stream, "out.log");
+
+    expect(messages.join("")).toBe(content);
+    expect(Math.max(...messages.map(({ length }) => length))).toBeLessThanOrEqual(
+      8 * 1024
+    );
+  });
+});

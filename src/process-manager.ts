@@ -341,10 +341,15 @@ import path from "path";
     // just for readability
      let results: LogItem[] = [];
           
-     results = (await Promise.all(containers.map(async (c) => {
-      const logs = await this.logManager.readLogs(c.name, c.id, lines, c.config.outFile, c.config.errorFile);     
-      return logs.map((log) => ({ name: c.name, id: c.id, ...log }))
-     }))).flat();
+     results = (await Promise.all(containers.map((c) =>
+       this.logManager.readLogs(
+         c.name,
+         c.id,
+         lines,
+         c.config.outFile,
+         c.config.errorFile
+       )
+     ))).flat();
      
      
      let sortedResults = results
@@ -360,9 +365,58 @@ import path from "path";
      const lm = this.logManager;
      
      await Promise.all(containers.map(async (c) => (
-      lm.tailLog(c.name, c.id, streamController, signal)
+      lm.tailLog(
+        c.name,
+        c.id,
+        streamController,
+        signal,
+        c.config.outFile,
+        c.config.errorFile
+      )
      )))
      
+   }
+
+   async subscribeLogs(
+     target: string | number,
+     lines: number,
+     onSnapshot: (logs: LogItem[]) => void,
+     onLog: (log: LogItem) => void,
+     signal: AbortSignal
+   ): Promise<void> {
+     const containers = this.resolveTarget(target);
+     const streams = await Promise.all(
+       containers.map(async (container) => ({
+         prepared: await this.logManager.prepareLogStream(
+           container.name,
+           container.id,
+           lines,
+           container.config.outFile,
+           container.config.errorFile
+         ),
+       }))
+     );
+
+     if (signal.aborted) return;
+
+     const snapshot = streams
+       .flatMap(({ prepared }) => prepared.logs)
+       .sort((a, b) => (a.ts || "").localeCompare(b.ts || ""))
+       .slice(-lines);
+     onSnapshot(snapshot);
+
+     if (signal.aborted) return;
+
+     const stops = streams.map(({ prepared }) => prepared.start(onLog));
+     const stop = () => {
+       for (const stopStream of stops) stopStream();
+     };
+
+     if (signal.aborted) {
+       stop();
+       return;
+     }
+     signal.addEventListener("abort", stop, { once: true });
    }
  
    async flushLogs(target?: string | number) {

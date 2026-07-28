@@ -1,7 +1,17 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdir, rm, writeFile, readFile, exists, readdir } from "fs/promises";
+import {
+  appendFile,
+  mkdir,
+  rm,
+  writeFile,
+  readFile,
+  exists,
+  readdir,
+} from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
+import { LogManager } from "../src/log-manager";
+import type { LogItem } from "../src/types";
 
 const TEST_DIR = join(tmpdir(), `bm2-test-logs-${Date.now()}`);
 const LOG_DIR = join(TEST_DIR, "logs");
@@ -15,6 +25,52 @@ afterEach(async () => {
 });
 
 describe("Log File Management", () => {
+  test("streams entries written after an exact initial snapshot", async () => {
+    const manager = new LogManager();
+    const outFile = join(LOG_DIR, "stream-out.log");
+    const errFile = join(LOG_DIR, "stream-error.log");
+    await writeFile(
+      outFile,
+      `${JSON.stringify({
+        ts: "2026-07-28T08:00:00.000Z",
+        msg: "initial",
+      })}\n`
+    );
+    await writeFile(errFile, "");
+
+    const stream = await manager.prepareLogStream(
+      "stream",
+      7,
+      50,
+      outFile,
+      errFile
+    );
+    expect(stream.logs.map(({ msg }) => msg)).toEqual(["initial"]);
+
+    await appendFile(
+      outFile,
+      `${JSON.stringify({
+        ts: "2026-07-28T08:00:01.000Z",
+        msg: "live",
+      })}\n`
+    );
+
+    const received: LogItem[] = [];
+    const stop = stream.start((log) => received.push(log));
+    for (let attempt = 0; attempt < 20 && received.length === 0; attempt++) {
+      await Bun.sleep(10);
+    }
+    stop();
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({
+      id: 7,
+      name: "stream",
+      level: "out",
+      msg: "live",
+    });
+  });
+
   test("should create stdout log file", async () => {
     const logFile = join(LOG_DIR, "app-out.log");
     await writeFile(logFile, "");
