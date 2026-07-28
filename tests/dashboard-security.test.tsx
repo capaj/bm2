@@ -1,8 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { LogRecord, ProcessTable } from "../src/dashboard-app";
+import {
+  createCachedDashboardAsset,
+  Dashboard,
+  serveCachedDashboardAsset,
+} from "../src/dashboard";
 import { getDashboardHTML } from "../src/dashboard-ui";
-import type { ProcessState } from "../src/types";
+import { ProcessManager } from "../src/process-manager";
+import type { DashboardProcessState } from "../src/types";
 
 const maliciousName = `"><img src=x onerror="globalThis.pwned=true">`;
 
@@ -11,12 +17,11 @@ const processState = {
   name: maliciousName,
   status: "online",
   pid: 123,
-  monit: { cpu: 1, memory: 1024 },
-  bm2_env: {
-    restart_time: 0,
-    pm_uptime: Date.now(),
-  },
-} as ProcessState;
+  cpu: 1,
+  memory: 1024,
+  restarts: 0,
+  startedAt: Date.now(),
+} satisfies DashboardProcessState;
 
 describe("dashboard XSS protection", () => {
   test("renders process names as escaped React text", () => {
@@ -59,5 +64,73 @@ describe("dashboard XSS protection", () => {
     expect(html).toContain('<script type="module" src="/dashboard.js"></script>');
     expect(html).not.toContain("innerHTML");
     expect(html).not.toContain("onclick=");
+  });
+
+  test("dashboard process payloads exclude executable config and environment data", () => {
+    const manager = new ProcessManager();
+    (manager as any).processes.set(1, {
+      getDashboardState: () => processState,
+      getState: () => {
+        throw new Error("full process state should not be constructed");
+      },
+    });
+
+    const payload = JSON.stringify(manager.listDashboard());
+    expect(JSON.parse(payload)[0].name).toBe(maliciousName);
+    expect(payload).not.toContain("bm2_env");
+    expect(payload).not.toContain("env");
+  });
+
+  test("broadcasts the latest snapshot without collecting duplicate metrics", () => {
+    let metricCollections = 0;
+    let message = "";
+    const dashboard = new Dashboard({
+      listDashboard: () => [processState],
+      monitor: { getLatest: () => null },
+      getMetrics: () => {
+        metricCollections++;
+      },
+    } as any);
+    (dashboard as any).clients.add({
+      send: (value: string) => {
+        message = value;
+      },
+    });
+
+    (dashboard as any).broadcast();
+    expect(metricCollections).toBe(0);
+    expect(JSON.parse(message).data.processes).toHaveLength(1);
+  });
+
+  test("serves compressed assets and revalidates them with ETags", async () => {
+    const asset = createCachedDashboardAsset("const value = 'dashboard';".repeat(100));
+    const compressed = serveCachedDashboardAsset(
+      new Request("http://localhost/dashboard.js", {
+        headers: { "Accept-Encoding": "gzip, br" },
+      }),
+      asset,
+      "text/javascript; charset=utf-8"
+    );
+
+    expect(compressed.headers.get("content-encoding")).toBe("br");
+    expect(compressed.headers.get("etag")).toBe(asset.etag);
+    expect(compressed.headers.get("vary")).toBe("Accept-Encoding");
+    expect(Number(compressed.headers.get("content-length"))).toBe(
+      asset.brotli.byteLength
+    );
+    expect(asset.brotli.byteLength).toBeLessThan(asset.identity.byteLength);
+
+    const notModified = serveCachedDashboardAsset(
+      new Request("http://localhost/dashboard.js", {
+        headers: {
+          "Accept-Encoding": "gzip",
+          "If-None-Match": asset.etag,
+        },
+      }),
+      asset,
+      "text/javascript; charset=utf-8"
+    );
+    expect(notModified.status).toBe(304);
+    expect(await notModified.text()).toBe("");
   });
 });

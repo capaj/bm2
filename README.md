@@ -1246,7 +1246,7 @@ The dashboard exposes a REST API on the same port:
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/` | Dashboard HTML |
-| `GET` | `/api/processes` | List all processes as JSON |
+| `GET` | `/api/processes` | List dashboard process summaries (configuration and environment are omitted) |
 | `GET` | `/api/metrics` | Current metrics snapshot |
 | `GET` | `/api/metrics/history?seconds=300` | Historical metrics |
 | `GET` | `/api/prometheus` or `/metrics` | Prometheus text format |

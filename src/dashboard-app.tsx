@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { MetricSnapshot, ProcessState, ProcessStatus } from "./types";
-
-interface DashboardState {
-  processes: ProcessState[];
-  metrics?: MetricSnapshot;
-}
+import type {
+  DashboardProcessState,
+  DashboardState,
+  MetricSnapshot,
+  ProcessStatus,
+} from "./types";
 
 interface LogEntry {
   id: number;
@@ -61,6 +61,8 @@ function formatUptime(milliseconds: number): string {
 function useDashboardSocket() {
   const [dashboardState, setDashboardState] = useState<DashboardState>({
     processes: [],
+    system: null,
+    timestamp: 0,
   });
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [updatedAt, setUpdatedAt] = useState<Date>();
@@ -80,8 +82,9 @@ function useDashboardSocket() {
         try {
           const message = JSON.parse(String(event.data)) as SocketMessage;
           if (message.type === "state") {
-            setDashboardState(message.data as DashboardState);
-            setUpdatedAt(new Date());
+            const nextState = message.data as DashboardState;
+            setDashboardState(nextState);
+            setUpdatedAt(new Date(nextState.timestamp));
           } else if (message.type === "logs") {
             setLogs(message.data as LogEntry[]);
           }
@@ -129,10 +132,13 @@ function StatCard({
   );
 }
 
-function SystemInfo({ metrics }: { metrics?: MetricSnapshot }) {
-  if (!metrics?.system) return null;
+function SystemInfo({
+  system,
+}: {
+  system: MetricSnapshot["system"] | null;
+}) {
+  if (!system) return null;
 
-  const system = metrics.system;
   const memoryPercent =
     ((system.totalMemory - system.freeMemory) / system.totalMemory) * 100;
   const progressClass =
@@ -177,7 +183,7 @@ export function ProcessTable({
   send,
   viewLogs,
 }: {
-  processes: ProcessState[];
+  processes: DashboardProcessState[];
   send: (type: string, data: unknown) => void;
   viewLogs: (id: number) => void;
 }) {
@@ -209,12 +215,12 @@ export function ProcessTable({
                 <span className={`status${statusClass}`}>{process.status}</span>
               </td>
               <td>{process.pid || "-"}</td>
-              <td>{process.monit.cpu.toFixed(1)}%</td>
-              <td>{formatBytes(process.monit.memory)}</td>
-              <td>{process.bm2_env.restart_time}</td>
+              <td>{process.cpu.toFixed(1)}%</td>
+              <td>{formatBytes(process.memory)}</td>
+              <td>{process.restarts}</td>
               <td>
                 {process.status === "online"
-                  ? formatUptime(Date.now() - process.bm2_env.pm_uptime)
+                  ? formatUptime(Date.now() - process.startedAt)
                   : "-"}
               </td>
               <td className="actions">
@@ -290,7 +296,7 @@ function LogsPanel({
   viewLogs,
 }: {
   logs: LogEntry[];
-  processes: ProcessState[];
+  processes: DashboardProcessState[];
   selectedProcess: number | null;
   viewLogs: (id: number) => void;
 }) {
@@ -406,14 +412,14 @@ function MetricsChart({ point }: { point: ChartPoint }) {
 function DashboardApp() {
   const { dashboardState, logs, send, updatedAt } = useDashboardSocket();
   const [selectedProcess, setSelectedProcess] = useState<number | null>(null);
-  const { processes, metrics } = dashboardState;
+  const { processes, system } = dashboardState;
 
   const totals = useMemo(
     () =>
       processes.reduce(
         (result, process) => ({
-          cpu: result.cpu + process.monit.cpu,
-          memory: result.memory + process.monit.memory,
+          cpu: result.cpu + process.cpu,
+          memory: result.memory + process.memory,
         }),
         { cpu: 0, memory: 0 }
       ),
@@ -455,7 +461,7 @@ function DashboardApp() {
         />
         <section className="card section">
           <h3>System</h3>
-          <SystemInfo metrics={metrics} />
+          <SystemInfo system={system} />
         </section>
         <section className="card section">
           <h3>Processes</h3>

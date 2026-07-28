@@ -19,6 +19,92 @@ import { getDashboardHTML } from "./dashboard-ui";
 import { DASHBOARD_PORT, METRICS_PORT } from "./constants";
 import type { Server, ServerWebSocket } from "bun";
 import { join } from "path";
+import type { DashboardState } from "./types";
+import { createHash } from "crypto";
+import {
+  brotliCompressSync,
+  constants as zlibConstants,
+  gzipSync,
+} from "zlib";
+
+export interface CachedDashboardAsset {
+  identity: Uint8Array;
+  gzip: Uint8Array;
+  brotli: Uint8Array;
+  etag: string;
+}
+
+export function createCachedDashboardAsset(source: string): CachedDashboardAsset {
+  const identity = new TextEncoder().encode(source);
+  const digest = createHash("sha256").update(identity).digest("hex").slice(0, 24);
+  return {
+    identity,
+    gzip: gzipSync(identity, { level: 6 }),
+    brotli: brotliCompressSync(identity, {
+      params: {
+        [zlibConstants.BROTLI_PARAM_QUALITY]: 5,
+      },
+    }),
+    etag: `W/"${digest}"`,
+  };
+}
+
+function acceptedEncodingQuality(header: string, encoding: string): number {
+  let wildcardQuality = 0;
+  for (const value of header.toLowerCase().split(",")) {
+    const [name, ...parameters] = value.trim().split(";");
+    const qualityParameter = parameters.find((parameter) =>
+      parameter.trim().startsWith("q=")
+    );
+    const quality = qualityParameter
+      ? Number.parseFloat(qualityParameter.trim().slice(2))
+      : 1;
+    const normalizedQuality = Number.isFinite(quality) ? quality : 0;
+    if (name === encoding) return normalizedQuality;
+    if (name === "*") wildcardQuality = normalizedQuality;
+  }
+  return wildcardQuality;
+}
+
+export function serveCachedDashboardAsset(
+  request: Request,
+  asset: CachedDashboardAsset,
+  contentType: string
+): Response {
+  const acceptEncoding = request.headers.get("accept-encoding") || "";
+  const brotliQuality = acceptedEncodingQuality(acceptEncoding, "br");
+  const gzipQuality = acceptedEncodingQuality(acceptEncoding, "gzip");
+  const encoding =
+    brotliQuality > 0 && brotliQuality >= gzipQuality
+      ? "br"
+      : gzipQuality > 0
+        ? "gzip"
+        : null;
+  const headers = new Headers({
+    "Cache-Control": "public, max-age=0, must-revalidate",
+    "Content-Type": contentType,
+    ETag: asset.etag,
+    Vary: "Accept-Encoding",
+    "X-Content-Type-Options": "nosniff",
+  });
+  if (encoding) headers.set("Content-Encoding", encoding);
+
+  const validators = (request.headers.get("if-none-match") || "")
+    .split(",")
+    .map((value) => value.trim());
+  if (validators.includes(asset.etag) || validators.includes("*")) {
+    return new Response(null, { status: 304, headers });
+  }
+
+  const body =
+    encoding === "br"
+      ? asset.brotli
+      : encoding === "gzip"
+        ? asset.gzip
+        : asset.identity;
+  headers.set("Content-Length", String(body.byteLength));
+  return new Response(body as unknown as BodyInit, { headers });
+}
 
 export async function buildDashboardClient(): Promise<string> {
   const result = await Bun.build({
@@ -43,7 +129,8 @@ export class Dashboard {
 
   private server: Server<unknown> | null = null;
   private metricsServer: Server<unknown> | null = null;
-  private clientBundle: string | null = null;
+  private clientAsset: CachedDashboardAsset | null = null;
+  private stylesheetAsset: CachedDashboardAsset | null = null;
 
   private clients: Set<ServerWebSocket<unknown>> = new Set();
   private pm: ProcessManager;
@@ -54,7 +141,14 @@ export class Dashboard {
   }
 
   async start(port: number = DASHBOARD_PORT, metricsPort: number = METRICS_PORT) {
-    this.clientBundle ??= await buildDashboardClient();
+    if (!this.clientAsset || !this.stylesheetAsset) {
+      const [clientBundle, stylesheet] = await Promise.all([
+        buildDashboardClient(),
+        Bun.file(join(import.meta.dir, "dashboard.css")).text(),
+      ]);
+      this.clientAsset = createCachedDashboardAsset(clientBundle);
+      this.stylesheetAsset = createCachedDashboardAsset(stylesheet);
+    }
 
     // Dashboard + WebSocket server
     this.server = Bun.serve<unknown>({
@@ -68,7 +162,7 @@ export class Dashboard {
         }
 
         if (url.pathname === "/api/processes") {
-          return Response.json(this.pm.list());
+          return Response.json(this.pm.listDashboard());
         }
 
         if (url.pathname === "/api/metrics") {
@@ -88,22 +182,19 @@ export class Dashboard {
         }
 
         if (url.pathname === "/dashboard.js") {
-          return new Response(this.clientBundle, {
-            headers: {
-              "Content-Type": "text/javascript; charset=utf-8",
-              "Cache-Control": "no-store",
-              "X-Content-Type-Options": "nosniff",
-            },
-          });
+          return serveCachedDashboardAsset(
+            req,
+            this.clientAsset!,
+            "text/javascript; charset=utf-8"
+          );
         }
 
         if (url.pathname === "/dashboard.css") {
-          return new Response(Bun.file(join(import.meta.dir, "dashboard.css")), {
-            headers: {
-              "Content-Type": "text/css; charset=utf-8",
-              "X-Content-Type-Options": "nosniff",
-            },
-          });
+          return serveCachedDashboardAsset(
+            req,
+            this.stylesheetAsset!,
+            "text/css; charset=utf-8"
+          );
         }
 
         // Action endpoints
@@ -128,6 +219,7 @@ export class Dashboard {
               "base-uri 'none'",
               "frame-ancestors 'none'",
             ].join("; "),
+            "Cache-Control": "no-cache",
             "X-Content-Type-Options": "nosniff",
           },
         });
@@ -135,12 +227,7 @@ export class Dashboard {
       websocket: {
         open: (ws) => {
           this.clients.add(ws);
-          // Send initial state
-          const state = {
-            processes: this.pm.list(),
-            metrics: this.pm.monitor.getLatest(),
-          };
-          ws.send(JSON.stringify({ type: "state", data: state }));
+          ws.send(JSON.stringify({ type: "state", data: this.getState() }));
         },
         message: async (ws, message) => {
           try {
@@ -170,11 +257,9 @@ export class Dashboard {
       },
     });
 
-    // Periodic broadcast
-    this.updateInterval = setInterval(async () => {
-      await this.pm.getMetrics(); // Collect snapshot
-      this.broadcast();
-    }, 2000);
+    // The daemon owns metric collection. The dashboard only publishes the
+    // latest snapshot, avoiding a second history entry every two seconds.
+    this.updateInterval = setInterval(() => this.broadcast(), 2000);
 
     console.log(`[bm2] Dashboard running at http://localhost:${port}`);
     console.log(`[bm2] Prometheus metrics at http://localhost:${metricsPort}/metrics`);
@@ -210,11 +295,7 @@ export class Dashboard {
   private async handleWsMessage(ws: ServerWebSocket<unknown>, msg: any) {
     switch (msg.type) {
       case "getState": {
-        const state = {
-          processes: this.pm.list(),
-          metrics: this.pm.monitor.getLatest(),
-        };
-        ws.send(JSON.stringify({ type: "state", data: state }));
+        ws.send(JSON.stringify({ type: "state", data: this.getState() }));
         break;
       }
       case "getLogs": {
@@ -238,11 +319,7 @@ export class Dashboard {
   }
 
   private broadcast() {
-    const state = {
-      processes: this.pm.list(),
-      metrics: this.pm.monitor.getLatest(),
-    };
-    const message = JSON.stringify({ type: "state", data: state });
+    const message = JSON.stringify({ type: "state", data: this.getState() });
     for (const client of this.clients) {
       try {
         client.send(message);
@@ -250,6 +327,15 @@ export class Dashboard {
         this.clients.delete(client);
       }
     }
+  }
+
+  private getState(): DashboardState {
+    const latestMetrics = this.pm.monitor.getLatest();
+    return {
+      processes: this.pm.listDashboard(),
+      system: latestMetrics?.system ?? null,
+      timestamp: latestMetrics?.timestamp ?? Date.now(),
+    };
   }
 
   stop() {

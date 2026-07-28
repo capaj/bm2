@@ -15,6 +15,7 @@
  */
  import type {
    ProcessDescription,
+   DashboardProcessState,
    ProcessState,
    StartOptions,
    EcosystemConfig,
@@ -29,6 +30,7 @@
  import { CronManager } from "./cron-manager";
  import { Monitor } from "./monitor";
  import { GracefulReload } from "./graceful-reload";
+ import { BatchProcessMonitor } from "./process-monitor";
  import { parseMemory, DUMP_FILE } from "./utils";
  import {
    DEFAULT_KILL_TIMEOUT,
@@ -50,6 +52,7 @@ import type { ReadableStreamController } from "bun";
    public cronManager: CronManager;
    public monitor: Monitor;
    public gracefulReload: GracefulReload;
+   private processMonitor: BatchProcessMonitor;
  
    constructor() {
      this.logManager = new LogManager();
@@ -58,6 +61,9 @@ import type { ReadableStreamController } from "bun";
      this.cronManager = new CronManager();
      this.monitor = new Monitor();
      this.gracefulReload = new GracefulReload();
+     this.processMonitor = new BatchProcessMonitor(() =>
+       Array.from(this.processes.values())
+     );
    }
  
   async start(options: StartOptions): Promise<ProcessState[]> {
@@ -96,6 +102,7 @@ import type { ReadableStreamController } from "bun";
 
         this.processes.set(id, container);
         await container.start();
+        this.processMonitor.start();
         states.push(container.getState());
       }
       
@@ -117,6 +124,7 @@ import type { ReadableStreamController } from "bun";
   
       this.processes.set(id, container);
       await container.start();
+      this.processMonitor.start();
       states.push(container.getState());
     }
 
@@ -189,6 +197,7 @@ import type { ReadableStreamController } from "bun";
        await c.stop();
        states.push(c.getState());
      }
+     this.stopProcessMonitorWhenIdle();
      return states;
    }
  
@@ -199,6 +208,7 @@ import type { ReadableStreamController } from "bun";
        await c.restart();
        states.push(c.getState());
      }
+     if (states.length > 0) this.processMonitor.start();
      return states;
    }
  
@@ -206,6 +216,7 @@ import type { ReadableStreamController } from "bun";
      const containers = this.resolveTarget(target);
      // Use graceful reload for zero downtime
      await this.gracefulReload.reload(containers);
+     if (containers.length > 0) this.processMonitor.start();
      return containers.map((c) => c.getState());
    }
  
@@ -217,6 +228,7 @@ import type { ReadableStreamController } from "bun";
        states.push(c.getState());
        this.processes.delete(c.id);
      }
+     this.stopProcessMonitorWhenIdle();
      return states;
    }
  
@@ -226,6 +238,7 @@ import type { ReadableStreamController } from "bun";
        await c.stop();
        states.push(c.getState());
      }
+     this.processMonitor.stop();
      return states;
    }
  
@@ -235,12 +248,14 @@ import type { ReadableStreamController } from "bun";
        await c.restart();
        states.push(c.getState());
      }
+     if (states.length > 0) this.processMonitor.start();
      return states;
    }
  
    async reloadAll(): Promise<ProcessState[]> {
      const containers = Array.from(this.processes.values());
      await this.gracefulReload.reload(containers);
+     if (containers.length > 0) this.processMonitor.start();
      return containers.map((c) => c.getState());
    }
  
@@ -252,6 +267,7 @@ import type { ReadableStreamController } from "bun";
        states.push(c.getState());
      }
      this.processes.clear();
+     this.processMonitor.stop();
      this.nextId = 0;
      return states;
    }
@@ -294,6 +310,7 @@ import type { ReadableStreamController } from "bun";
          await c.stop(true);
          this.processes.delete(c.id);
        }
+       this.stopProcessMonitorWhenIdle();
        return containers.slice(0, count).map((c) => c.getState());
      }
    
@@ -302,6 +319,10 @@ import type { ReadableStreamController } from "bun";
    
    list(): ProcessState[] {
      return Array.from(this.processes.values()).map((p) => p.getState());
+   }
+
+   listDashboard(): DashboardProcessState[] {
+     return Array.from(this.processes.values()).map((p) => p.getDashboardState());
    }
  
    describe(target: string | number): ProcessState[] {
@@ -420,6 +441,13 @@ import type { ReadableStreamController } from "bun";
        c.unstableRestarts = 0;
      }
      return containers.map((c) => c.getState());
+   }
+
+   private stopProcessMonitorWhenIdle(): void {
+     const hasOnlineProcess = Array.from(this.processes.values()).some(
+       (process) => process.getMonitoringPid() !== null
+     );
+     if (!hasOnlineProcess) this.processMonitor.stop();
    }
  
    private resolveTarget(target: string | number): ProcessContainer[] {

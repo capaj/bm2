@@ -226,9 +226,20 @@ export interface HealthCheckConfig {
 }
 
 export interface DashboardState {
-  processes: ProcessState[];
-  metrics: MetricSnapshot;
-  logs: Record<string, { out: string; err: string }>;
+  processes: DashboardProcessState[];
+  system: MetricSnapshot["system"] | null;
+  timestamp: number;
+}
+
+export interface DashboardProcessState {
+  pm_id: number;
+  name: string;
+  status: ProcessStatus;
+  pid?: number;
+  cpu: number;
+  memory: number;
+  restarts: number;
+  startedAt: number;
 }
 
 export type LogEntry = {

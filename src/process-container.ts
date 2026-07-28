@@ -16,6 +16,7 @@
 import type { Subprocess } from "bun";
 import type {
   ProcessDescription,
+  DashboardProcessState,
   ProcessState,
   ProcessStatus,
   LogRotateOptions,
@@ -28,12 +29,10 @@ import { treeKill } from "./utils";
 import { join } from "path";
 import {
   PID_DIR,
-  MONITOR_INTERVAL,
   DEFAULT_LOG_MAX_SIZE,
   DEFAULT_LOG_RETAIN,
 } from "./constants";
-import pidusage from "pidusage";
-import { readdir } from "node:fs/promises";
+import type { ProcessUsage } from "./process-monitor";
 
 
 export class ProcessContainer {
@@ -59,7 +58,6 @@ export class ProcessContainer {
   private cronManager: CronManager;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private watcher: ReturnType<typeof import("fs").watch> | null = null;
-  private monitorInterval: ReturnType<typeof setInterval> | null = null;
   private logRotateInterval: ReturnType<typeof setInterval> | null = null;
   private isRestarting: boolean = false;
 
@@ -115,9 +113,6 @@ export class ProcessContainer {
           String(this.pid)
         );
       }
-
-      // Start monitoring
-      this.startMonitoring();
 
       // Start log rotation
       this.startLogRotation(logPaths);
@@ -265,39 +260,6 @@ export class ProcessContainer {
     }
   }
 
-  
-  private startMonitoring() {
-      this.monitorInterval = setInterval(async () => {
-        
-        if (!this.pid || this.status !== "online") return;
-  
-        try {
-          
-          // 1. Fetch cross-platform CPU and Memory usage
-          const stats = await pidusage(this.pid);
-          
-          // pidusage returns memory directly in bytes and cpu as a percentage
-          this.memory = stats.memory; 
-          this.cpu = stats.cpu;
-  
-          // 2. Track file descriptors (handles) on Linux
-          // (pidusage does not provide this metric, so we keep the original logic)
-          if (process.platform === "linux") {
-            try {
-              this.handles = (await readdir(`/proc/${this.pid}/fd`)).length;
-            } catch {}
-          }
-  
-          // 3. Max memory restart
-          if (this.config.maxMemoryRestart && this.memory > this.config.maxMemoryRestart) {
-            console.log(`[bm2] ${this.name} exceeded memory limit (${this.memory} > ${this.config.maxMemoryRestart}), restarting...`);
-            await this.restart();
-          }
-          
-        } catch {}
-      }, MONITOR_INTERVAL);
-  }
-
   private startLogRotation(logPaths: { outFile: string; errFile: string }) {
     const rotateOpts: LogRotateOptions = {
       maxSize: this.config.logMaxSize || DEFAULT_LOG_MAX_SIZE,
@@ -375,10 +337,6 @@ export class ProcessContainer {
   }
 
   private cleanupTimers() {
-    if (this.monitorInterval) {
-      clearInterval(this.monitorInterval);
-      this.monitorInterval = null;
-    }
     if (this.logRotateInterval) {
       clearInterval(this.logRotateInterval);
       this.logRotateInterval = null;
@@ -517,6 +475,47 @@ export class ProcessContainer {
         axm_monitor: this.axmMonitor,
       },
     };
+  }
+
+  getDashboardState(): DashboardProcessState {
+    return {
+      pm_id: this.id,
+      name: this.name,
+      status: this.status,
+      pid: this.pid,
+      cpu: this.cpu,
+      memory: this.memory,
+      restarts: this.restartCount,
+      startedAt: this.startedAt,
+    };
+  }
+
+  getMonitoringPid(): number | null {
+    return this.status === "online" && this.pid ? this.pid : null;
+  }
+
+  async applyMonitoringStats(
+    pid: number,
+    usage: ProcessUsage,
+    handles?: number
+  ): Promise<void> {
+    // A restart can complete while a batch is being sampled. Never apply
+    // metrics collected for the previous child process.
+    if (this.status !== "online" || this.pid !== pid) return;
+
+    this.memory = usage.memory;
+    this.cpu = usage.cpu;
+    if (handles !== undefined) this.handles = handles;
+
+    if (
+      this.config.maxMemoryRestart &&
+      this.memory > this.config.maxMemoryRestart
+    ) {
+      console.log(
+        `[bm2] ${this.name} exceeded memory limit (${this.memory} > ${this.config.maxMemoryRestart}), restarting...`
+      );
+      await this.restart();
+    }
   }
 
   toJSON() {
