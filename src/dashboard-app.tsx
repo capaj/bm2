@@ -523,7 +523,7 @@ export function ProcessTable({
   processes,
   send,
 }: {
-  openProcess: (id: number) => void;
+  openProcess: (name: string) => void;
   processes: DashboardProcessState[];
   send: (type: string, data: unknown) => void;
 }) {
@@ -547,7 +547,7 @@ export function ProcessTable({
           const statusClass = KNOWN_STATUS_CLASSES.has(process.status)
             ? ` ${process.status}`
             : "";
-          const processPath = `/process/${process.pm_id}`;
+          const processPath = getProcessPath(process.name);
           return (
             <tr
               className="process-row"
@@ -560,7 +560,7 @@ export function ProcessTable({
                 ) {
                   return;
                 }
-                openProcess(process.pm_id);
+                openProcess(process.name);
               }}
             >
               <td>{process.pm_id}</td>
@@ -954,10 +954,18 @@ interface DashboardRoutesProps {
   updatedAt?: Date;
 }
 
-export function parseProcessId(value: string | undefined): number | null {
-  if (!value || !/^\d+$/.test(value)) return null;
-  const id = Number(value);
-  return Number.isSafeInteger(id) ? id : null;
+export function getProcessPath(name: string): string {
+  return `/process/${encodeURIComponent(name)}`;
+}
+
+export function parseProcessName(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    const name = decodeURIComponent(value);
+    return name.length > 0 ? name : null;
+  } catch {
+    return null;
+  }
 }
 
 function DashboardHeader({ updatedAt }: { updatedAt?: Date }) {
@@ -981,7 +989,7 @@ function OverviewPage({
   updatedAt,
 }: {
   dashboardState: DashboardState;
-  openProcess: (id: number) => void;
+  openProcess: (name: string) => void;
   send: (type: string, data: unknown) => void;
   updatedAt?: Date;
 }) {
@@ -1034,7 +1042,7 @@ function OverviewPage({
 function ProcessDetailPage({
   hasDashboardState,
   logBuffer,
-  processIdValue,
+  processNameValue,
   processes,
   send,
   subscribeToLogs,
@@ -1042,17 +1050,17 @@ function ProcessDetailPage({
 }: {
   hasDashboardState: boolean;
   logBuffer: LogBuffer;
-  processIdValue: string | undefined;
+  processNameValue: string | undefined;
   processes: DashboardProcessState[];
   send: (type: string, data: unknown) => void;
   subscribeToLogs: (target: number) => void;
   unsubscribeFromLogs: () => void;
 }) {
-  const processId = parseProcessId(processIdValue);
+  const processName = parseProcessName(processNameValue);
   const process =
-    processId === null
+    processName === null
       ? undefined
-      : processes.find(({ pm_id }) => pm_id === processId);
+      : processes.find(({ name }) => name === processName);
   const activeProcessId = process?.pm_id;
 
   useEffect(() => {
@@ -1061,7 +1069,7 @@ function ProcessDetailPage({
     return unsubscribeFromLogs;
   }, [activeProcessId, subscribeToLogs, unsubscribeFromLogs]);
 
-  if (processId === null || (hasDashboardState && !process)) {
+  if (processName === null || (hasDashboardState && !process)) {
     return (
       <main className="container route-message">
         <div className="card">
@@ -1178,18 +1186,18 @@ export function DashboardRoutes({
 }: DashboardRoutesProps) {
   const [, navigate] = useLocation();
   const openProcess = useCallback(
-    (id: number) => navigate(`/process/${id}`),
+    (name: string) => navigate(getProcessPath(name)),
     [navigate]
   );
 
   return (
     <Switch>
-      <Route path="/process/:id">
-        {({ id }) => (
+      <Route path="/process/:name">
+        {({ name }) => (
           <ProcessDetailPage
             hasDashboardState={hasDashboardState}
             logBuffer={logBuffer}
-            processIdValue={id}
+            processNameValue={name}
             processes={dashboardState.processes}
             send={send}
             subscribeToLogs={subscribeToLogs}

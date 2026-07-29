@@ -4,8 +4,9 @@ import { Router } from "wouter";
 import {
   createLogBuffer,
   DashboardRoutes,
+  getProcessPath,
   LogRecord,
-  parseProcessId,
+  parseProcessName,
   ProcessTable,
 } from "../src/dashboard-app";
 import {
@@ -53,7 +54,7 @@ describe("dashboard XSS protection", () => {
     expect(markup).not.toContain("<img");
     expect(markup).toContain("&lt;img");
     expect(markup).not.toContain("onclick=");
-    expect(markup).toContain('href="/process/1"');
+    expect(markup).toContain(`href="${getProcessPath(maliciousName)}"`);
   });
 
   test("renders log output as escaped React text", () => {
@@ -86,15 +87,16 @@ describe("dashboard XSS protection", () => {
 
   test("recognizes overview and process-detail paths as React routes", () => {
     expect(isDashboardPagePath("/")).toBe(true);
-    expect(isDashboardPagePath("/process/0")).toBe(true);
-    expect(isDashboardPagePath("/process/42/")).toBe(true);
-    expect(isDashboardPagePath("/process/not-a-number")).toBe(false);
+    expect(isDashboardPagePath("/process/trading-bot")).toBe(true);
+    expect(isDashboardPagePath("/process/worker%2Feu%20%231/")).toBe(true);
+    expect(isDashboardPagePath("/process/")).toBe(false);
+    expect(isDashboardPagePath("/process/trading-bot/logs")).toBe(false);
     expect(isDashboardPagePath("/dashboard.js")).toBe(false);
   });
 
   test("renders a routed process detail with the expanded live-log panel", () => {
     const markup = renderToStaticMarkup(
-      <Router ssrPath="/process/1">
+      <Router ssrPath={getProcessPath(maliciousName)}>
         <DashboardRoutes
           dashboardState={{
             processes: [processState],
@@ -117,12 +119,15 @@ describe("dashboard XSS protection", () => {
     expect(markup).not.toContain("<img");
   });
 
-  test("validates process IDs before selecting a process", () => {
-    expect(parseProcessId("0")).toBe(0);
-    expect(parseProcessId("42")).toBe(42);
-    expect(parseProcessId("-1")).toBeNull();
-    expect(parseProcessId("1.5")).toBeNull();
-    expect(parseProcessId("process-name")).toBeNull();
+  test("encodes and decodes process names used in routes", () => {
+    expect(getProcessPath("trading-bot")).toBe("/process/trading-bot");
+    expect(getProcessPath("worker/eu #1")).toBe(
+      "/process/worker%2Feu%20%231"
+    );
+    expect(parseProcessName("trading-bot")).toBe("trading-bot");
+    expect(parseProcessName("worker%2Feu%20%231")).toBe("worker/eu #1");
+    expect(parseProcessName("%E0%A4%A")).toBeNull();
+    expect(parseProcessName("")).toBeNull();
   });
 
   test("dashboard process payloads exclude executable config and environment data", () => {

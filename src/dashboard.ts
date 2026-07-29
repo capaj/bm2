@@ -45,7 +45,7 @@ export const DASHBOARD_WS_BACKPRESSURE_LIMIT_BYTES = 1024 * 1024;
 export const DASHBOARD_WS_BUFFERED_PAUSE_BYTES = 256 * 1024;
 
 export function isDashboardPagePath(pathname: string): boolean {
-  return pathname === "/" || /^\/process\/\d+\/?$/.test(pathname);
+  return pathname === "/" || /^\/process\/[^/]+\/?$/.test(pathname);
 }
 
 interface QueuedDashboardLog {
