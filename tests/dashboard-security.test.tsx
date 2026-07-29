@@ -18,6 +18,7 @@ import {
   DASHBOARD_LOG_QUEUE_MAX_BYTES,
   DASHBOARD_LOG_QUEUE_MAX_ENTRIES,
   DASHBOARD_LOG_SNAPSHOT_MAX_BYTES,
+  formatDashboardBuildError,
   isDashboardPagePath,
   serializeDashboardLog,
   serveCachedDashboardAsset,
@@ -40,6 +41,32 @@ const processState = {
 } satisfies DashboardProcessState;
 
 describe("dashboard XSS protection", () => {
+  test("preserves Bun bundle diagnostics instead of reporting only Bundle failed", () => {
+    const error = new AggregateError(
+      [
+        {
+          message:
+            'Could not resolve: "missing-dashboard-package". Maybe you need to "bun install"?',
+          position: {
+            file: "/tmp/dashboard-entry.tsx",
+            line: 3,
+            column: 8,
+            lineText: 'import "missing-dashboard-package";',
+          },
+        },
+      ],
+      "Bundle failed",
+    );
+
+    expect(formatDashboardBuildError(error)).toBe(
+      [
+        'Could not resolve: "missing-dashboard-package". Maybe you need to "bun install"?',
+        "  at /tmp/dashboard-entry.tsx:3:8",
+        '  import "missing-dashboard-package";',
+      ].join("\n"),
+    );
+  });
+
   test("renders process names as escaped React text", () => {
     const markup = renderToStaticMarkup(
       <Router ssrPath="/">

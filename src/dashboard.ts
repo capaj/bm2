@@ -176,19 +176,78 @@ export function serveCachedDashboardAsset(
   return new Response(body as unknown as BodyInit, { headers });
 }
 
+interface DashboardBuildDiagnostic {
+  message?: unknown;
+  position?: {
+    file?: unknown;
+    line?: unknown;
+    column?: unknown;
+    lineText?: unknown;
+  } | null;
+}
+
+function formatDashboardBuildDiagnostic(
+  diagnostic: DashboardBuildDiagnostic,
+): string {
+  const message =
+    typeof diagnostic.message === "string"
+      ? diagnostic.message
+      : String(diagnostic);
+  const position = diagnostic.position;
+  const file = typeof position?.file === "string" ? position.file : null;
+  const line = typeof position?.line === "number" ? position.line : null;
+  const column =
+    typeof position?.column === "number" ? position.column : null;
+  const lineText =
+    typeof position?.lineText === "string" ? position.lineText.trimEnd() : null;
+
+  const location =
+    file && line !== null
+      ? `\n  at ${file}:${line}${column !== null ? `:${column}` : ""}`
+      : "";
+  const source = lineText ? `\n  ${lineText}` : "";
+  return `${message}${location}${source}`;
+}
+
+export function formatDashboardBuildError(error: unknown): string {
+  if (error && typeof error === "object") {
+    const diagnostics = (error as { errors?: unknown }).errors;
+    if (Array.isArray(diagnostics) && diagnostics.length > 0) {
+      return diagnostics
+        .map((diagnostic) =>
+          formatDashboardBuildDiagnostic(
+            diagnostic as DashboardBuildDiagnostic,
+          ),
+        )
+        .join("\n");
+    }
+  }
+
+  return error instanceof Error ? error.message : String(error);
+}
+
 export async function buildDashboardClient(): Promise<string> {
-  const result = await Bun.build({
-    entrypoints: [join(import.meta.dir, "dashboard-app.tsx")],
-    target: "browser",
-    format: "esm",
-    minify: true,
-    define: {
-      "process.env.NODE_ENV": JSON.stringify("production"),
-    },
-  });
+  let result: Awaited<ReturnType<typeof Bun.build>>;
+  try {
+    result = await Bun.build({
+      entrypoints: [join(import.meta.dir, "dashboard-app.tsx")],
+      target: "browser",
+      format: "esm",
+      minify: true,
+      define: {
+        "process.env.NODE_ENV": JSON.stringify("production"),
+      },
+    });
+  } catch (error) {
+    throw new Error(
+      `Failed to build the dashboard client:\n${formatDashboardBuildError(error)}`,
+    );
+  }
 
   if (!result.success || !result.outputs[0]) {
-    const details = result.logs.map((log) => log.message).join("\n");
+    const details = result.logs
+      .map((log) => formatDashboardBuildDiagnostic(log))
+      .join("\n");
     throw new Error(`Failed to build the dashboard client${details ? `:\n${details}` : ""}`);
   }
 
