@@ -203,8 +203,14 @@ export default class Daemon {
           return { type: "stop", data: states, success: true, id: msg.id };
         }
         case "restart": {
-          const states = await pm.restart(msg.data.target);
-          return { type: "restart", data: states, success: true, id: msg.id };
+          const result = await pm.restartDetailed(msg.data.target);
+          return {
+            type: "restart",
+            data: result.states,
+            configReloads: result.configReloads,
+            success: true,
+            id: msg.id,
+          };
         }
         case "reload": {
           const states = await pm.reload(msg.data.target);
@@ -223,8 +229,14 @@ export default class Daemon {
           return { type: "stopAll", data: states, success: true, id: msg.id };
         }
         case "restartAll": {
-          const states = await pm.restartAll();
-          return { type: "restartAll", data: states, success: true, id: msg.id };
+          const result = await pm.restartAllDetailed();
+          return {
+            type: "restartAll",
+            data: result.states,
+            configReloads: result.configReloads,
+            success: true,
+            id: msg.id,
+          };
         }
         case "reloadAll": {
           const states = await pm.reloadAll();
@@ -239,6 +251,14 @@ export default class Daemon {
         }
         case "describe": {
           return { type: "describe", data: pm.describe(msg.data.target), success: true, id: msg.id };
+        }
+        case "configHistory": {
+          return {
+            type: "configHistory",
+            data: pm.getConfigHistory(msg.data.target, msg.data.limit),
+            success: true,
+            id: msg.id,
+          };
         }
         case "logs": {
           const logs = await pm.getLogs(msg.data.target, msg.data.lines);

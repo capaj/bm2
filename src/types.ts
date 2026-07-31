@@ -25,6 +25,59 @@ export type ProcessStatus =
 
 export type ExecMode = "fork" | "cluster";
 
+export interface ProcessConfigSource {
+  type: "cli" | "config-file";
+  path?: string;
+  appIndex?: number;
+  appName?: string;
+  workerIndex?: number;
+}
+
+export type ConfigHistorySource = "cli" | "config-file" | "saved-state";
+
+export type ConfigHistoryTrigger =
+  | "start"
+  | "restart"
+  | "reload"
+  | "automatic-restart"
+  | "health-check"
+  | "cron"
+  | "watch"
+  | "memory-limit"
+  | "resurrect"
+  | "scale";
+
+export interface ConfigHistoryChange {
+  field: string;
+  before: unknown | null;
+  after: unknown | null;
+}
+
+export interface ConfigHistoryEntry {
+  id: number;
+  processKey: string;
+  processName: string;
+  namespace?: string;
+  recordedAt: number;
+  source: ConfigHistorySource;
+  trigger: ConfigHistoryTrigger;
+  configFile?: string;
+  summary: string;
+  changes: ConfigHistoryChange[];
+  config: ProcessDescription;
+}
+
+export interface ConfigReloadNotice {
+  processName: string;
+  configFile: string;
+  changedFields: string[];
+}
+
+export interface RestartResult {
+  states: ProcessState[];
+  configReloads: ConfigReloadNotice[];
+}
+
 export interface ProcessDescription {
   id: number;
   name: string;
@@ -81,6 +134,9 @@ export interface ProcessDescription {
   // Version tracking
   version?: string;
   versioningConfig?: VersioningConfig;
+  // Where this registration came from. Config-file registrations are
+  // re-resolved before every subsequent start.
+  configSource?: ProcessConfigSource;
 }
 
 export interface VersioningConfig {
@@ -151,12 +207,14 @@ export interface StartOptions {
   namespace?: string;
   nodeArgs?: string[];
   sourceMapSupport?: boolean;
+  configSource?: ProcessConfigSource;
 }
 
 export interface EcosystemConfig {
   apps: StartOptions[];
   noDaemon?: boolean;
   deploy?: Record<string, DeployConfig>;
+  configFile?: string;
 }
 
 export interface DeployConfig {
@@ -186,6 +244,7 @@ export interface DaemonResponse {
   success: boolean;
   error?: string;
   id?: string;
+  configReloads?: ConfigReloadNotice[];
 }
 
 export interface MetricSnapshot {

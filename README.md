@@ -797,6 +797,45 @@ const config: EcosystemConfig = {
 export default config;
 ```
 
+#### Automatic config refresh and history
+
+Processes started from an ecosystem file retain the absolute path and app entry
+that created them. BM2 re-reads that file immediately before every subsequent
+start, including manual restarts, crash recovery, health-check restarts, watch
+restarts, cron restarts, memory-limit restarts, reloads, and resurrection.
+
+That makes the ecosystem file the source of truth for configuration changes:
+
+```sh
+# Register once and save the process list for machine reboots.
+bm2 start bm2.config.json
+bm2 save
+
+# Later, edit bm2.config.json and restart normally. No delete/recreate command
+# and no repetition of CLI flags is needed.
+bm2 restart ai-prediction
+```
+
+When the file changes the effective process configuration, BM2 confirms what
+it loaded before printing the process table:
+
+```text
+[bm2] bm2.config.json changed; loaded new configuration for ai-prediction (args, restartDelay)
+```
+
+An unchanged restart does not print this notice.
+
+BM2 stores changed configuration snapshots in
+`~/.bm2/config-history.sqlite`. Unchanged restarts are deduplicated. Each
+snapshot records when it was introduced, whether it came from a config file,
+CLI/API registration, or saved state, which restart path applied it, and the
+fields changed from the previous version. The process detail page in the web
+dashboard exposes this history under the **Configuration** tab.
+
+Registrations created by older BM2 versions do not contain their original
+ecosystem path. Start the ecosystem file once after upgrading, then run
+`bm2 save`, to opt those existing registrations into automatic refresh.
+
 ---
 
 ### Environment Management
@@ -1235,6 +1274,8 @@ The BM2 dashboard is a React application bundled by Bun and served directly by t
 
 **Log Viewer** — A tabbed log panel that streams stdout and stderr from any selected process, with syntax highlighting for timestamps and error output. Logs auto-scroll to the latest entry.
 
+**Configuration History** — Each process detail page includes a configuration timeline with source and trigger labels, timestamps, field-level changes, and expandable complete snapshots.
+
 **Live Updates** — All data is streamed over WebSocket with a visual pulse indicator confirming the live connection. If the connection drops, the dashboard automatically reconnects within 2 seconds.
 
 ---
@@ -1249,6 +1290,7 @@ The dashboard exposes a REST API on the same port:
 | `GET` | `/api/processes` | List dashboard process summaries (configuration and environment are omitted) |
 | `GET` | `/api/metrics` | Current metrics snapshot |
 | `GET` | `/api/metrics/history?seconds=300` | Historical metrics |
+| `GET` | `/api/config-history?target=api&limit=100` | Configuration snapshots for a process |
 | `GET` | `/api/prometheus` or `/metrics` | Prometheus text format |
 | `POST` | `/api/restart` | Restart process |
 | `POST` | `/api/stop` | Stop process |
@@ -1525,6 +1567,17 @@ Hard restart one or more processes. The process is fully stopped and then re-spa
 ```ts
 await bm2.restart("api");
 await bm2.restart();          // Restart all
+```
+
+For a process registered from an ecosystem file, restart re-reads the file and
+applies changed options before spawning the replacement process.
+
+#### `bm2.configHistory(target: string | number, limit?: number)`
+
+Return newest-first configuration snapshots for a process.
+
+```ts
+const history = await bm2.configHistory("api", 50);
 ```
 
 #### `bm2.reload(target?: string | number): Promise<ProcessState[]>`

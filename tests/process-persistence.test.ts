@@ -4,6 +4,7 @@ import { ProcessContainer } from "../src/process-container";
 import { ProcessManager } from "../src/process-manager";
 import type { ProcessDescription } from "../src/types";
 import { DUMP_FILE } from "../src/utils";
+import { ConfigHistoryStore } from "../src/config-history-store";
 
 const originalBunFile = Bun.file;
 const originalBunWrite = Bun.write;
@@ -11,6 +12,7 @@ const originalContainerStart = ProcessContainer.prototype.start;
 
 let dumpContents: string | undefined;
 const managers: ProcessManager[] = [];
+const historyStores: ConfigHistoryStore[] = [];
 
 beforeEach(() => {
   dumpContents = undefined;
@@ -48,6 +50,8 @@ afterEach(() => {
     (manager as any).processMonitor.stop();
   }
   managers.length = 0;
+  for (const store of historyStores) store.close();
+  historyStores.length = 0;
 });
 
 describe("process persistence", () => {
@@ -117,7 +121,9 @@ describe("process persistence", () => {
       },
     };
 
-    const source = new ProcessManager();
+    const sourceHistory = new ConfigHistoryStore(":memory:");
+    historyStores.push(sourceHistory);
+    const source = new ProcessManager({ historyStore: sourceHistory });
     managers.push(source);
     (source as any).processes.set(config.id, {
       config,
@@ -125,7 +131,9 @@ describe("process persistence", () => {
     });
     await source.save();
 
-    const restored = new ProcessManager();
+    const restoredHistory = new ConfigHistoryStore(":memory:");
+    historyStores.push(restoredHistory);
+    const restored = new ProcessManager({ historyStore: restoredHistory });
     managers.push(restored);
     await restored.resurrect();
 

@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { Router } from "wouter";
 import {
   createLogBuffer,
+  ConfigHistoryTimeline,
   DashboardRoutes,
   getProcessPath,
   LogRecord,
@@ -121,7 +122,7 @@ describe("dashboard XSS protection", () => {
     expect(isDashboardPagePath("/dashboard.js")).toBe(false);
   });
 
-  test("renders a routed process detail with the expanded live-log panel", () => {
+  test("renders logs and configuration history only on process detail", () => {
     const markup = renderToStaticMarkup(
       <Router ssrPath={getProcessPath(maliciousName)}>
         <DashboardRoutes
@@ -140,10 +141,80 @@ describe("dashboard XSS protection", () => {
     );
 
     expect(markup).toContain("Live logs");
+    expect(markup).toContain("Configuration history");
     expect(markup).toContain("Back to processes");
     expect(markup).toContain("logs-panel-expanded");
     expect(markup).not.toContain("CPU &amp; Memory Over Time");
     expect(markup).not.toContain("<img");
+
+    const overviewMarkup = renderToStaticMarkup(
+      <Router ssrPath="/">
+        <DashboardRoutes
+          dashboardState={{
+            processes: [processState],
+            system: null,
+            timestamp: Date.now(),
+          }}
+          hasDashboardState
+          logBuffer={createLogBuffer()}
+          send={() => {}}
+          subscribeToLogs={() => {}}
+          unsubscribeFromLogs={() => {}}
+        />
+      </Router>
+    );
+
+    expect(overviewMarkup).not.toContain("Configuration history");
+  });
+
+  test("renders configuration history and diffs as escaped text", () => {
+    const markup = renderToStaticMarkup(
+      <ConfigHistoryTimeline
+        history={[
+          {
+            id: 1,
+            processKey: "process:default:malicious",
+            processName: "malicious",
+            recordedAt: Date.now(),
+            source: "config-file",
+            trigger: "restart",
+            configFile: `/tmp/<img src=x onerror=alert(1)>.json`,
+            summary: "bm2.config.json changed",
+            changes: [
+              {
+                field: "args",
+                before: ["--unsafe", "<script>alert(1)</script>"],
+                after: [],
+              },
+            ],
+            config: {
+              id: 1,
+              name: "malicious",
+              script: "/tmp/service.ts",
+              args: [],
+              cwd: "/tmp",
+              env: {},
+              instances: 1,
+              execMode: "fork",
+              autorestart: true,
+              maxRestarts: 3,
+              minUptime: 1_000,
+              watch: false,
+              mergeLogs: false,
+              killTimeout: 5_000,
+              restartDelay: 0,
+            },
+          },
+        ]}
+      />
+    );
+
+    expect(markup).toContain("Config file");
+    expect(markup).toContain("bm2.config.json changed");
+    expect(markup).toContain("&lt;img");
+    expect(markup).toContain("&lt;script&gt;");
+    expect(markup).not.toContain("<img");
+    expect(markup).not.toContain("<script>");
   });
 
   test("encodes and decodes process names used in routes", () => {

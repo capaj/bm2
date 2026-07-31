@@ -11,6 +11,7 @@ import { Link, Route, Switch, useLocation } from "wouter";
 import type {
   DashboardProcessState,
   DashboardState,
+  ConfigHistoryEntry,
   MetricSnapshot,
   ProcessStatus,
 } from "./types";
@@ -871,6 +872,155 @@ function LogsPanel({
   );
 }
 
+function formatHistoryValue(value: unknown): string {
+  if (value === null || value === undefined) return "not set";
+  const serialized =
+    typeof value === "string" ? value : JSON.stringify(value);
+  return serialized.length > 180
+    ? `${serialized.slice(0, 177)}…`
+    : serialized;
+}
+
+function historySourceLabel(entry: ConfigHistoryEntry): string {
+  if (entry.source === "config-file") return "Config file";
+  if (entry.source === "saved-state") return "Saved state";
+  return "CLI / API";
+}
+
+export function ConfigHistoryTimeline({
+  history,
+}: {
+  history: ConfigHistoryEntry[];
+}) {
+  if (history.length === 0) {
+    return (
+      <div className="config-history-empty">
+        No configuration snapshots have been recorded for this process yet.
+      </div>
+    );
+  }
+
+  return (
+    <div className="config-history-timeline">
+      {history.map((entry, index) => (
+        <article className="config-history-entry" key={entry.id}>
+          <div className="config-history-marker" aria-hidden="true" />
+          <div className="config-history-card">
+            <div className="config-history-heading">
+              <div>
+                <span className={`config-source config-source-${entry.source}`}>
+                  {historySourceLabel(entry)}
+                </span>
+                {index === 0 ? (
+                  <span className="config-current">Current</span>
+                ) : null}
+              </div>
+              <time dateTime={new Date(entry.recordedAt).toISOString()}>
+                {new Date(entry.recordedAt).toLocaleString()}
+              </time>
+            </div>
+            <h4>{entry.summary}</h4>
+            <div className="config-history-meta">
+              Introduced by <strong>{entry.trigger}</strong>
+              {entry.configFile ? (
+                <>
+                  {" "}from <code>{entry.configFile}</code>
+                </>
+              ) : null}
+            </div>
+            {entry.changes.length > 0 ? (
+              <div className="config-change-list">
+                {entry.changes.map((change) => (
+                  <div className="config-change" key={change.field}>
+                    <code>{change.field}</code>
+                    <span title={formatHistoryValue(change.before)}>
+                      {formatHistoryValue(change.before)}
+                    </span>
+                    <span className="config-change-arrow" aria-hidden="true">
+                      →
+                    </span>
+                    <span title={formatHistoryValue(change.after)}>
+                      {formatHistoryValue(change.after)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="config-initial">Initial configuration snapshot</div>
+            )}
+            <details className="config-json-details">
+              <summary>View complete configuration</summary>
+              <pre>{JSON.stringify(entry.config, null, 2)}</pre>
+            </details>
+          </div>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function ConfigurationHistoryPanel({
+  processId,
+  revision,
+}: {
+  processId: number;
+  revision: number;
+}) {
+  const [history, setHistory] = useState<ConfigHistoryEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string>();
+  const [refreshToken, setRefreshToken] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setError(undefined);
+    fetch(
+      `/api/config-history?target=${encodeURIComponent(processId)}&limit=100`,
+      { signal: controller.signal }
+    )
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Request failed (${response.status})`);
+        return (await response.json()) as ConfigHistoryEntry[];
+      })
+      .then((entries) => {
+        setHistory(entries);
+        setLoading(false);
+      })
+      .catch((reason) => {
+        if (controller.signal.aborted) return;
+        setError(reason instanceof Error ? reason.message : "Request failed");
+        setLoading(false);
+      });
+    return () => controller.abort();
+  }, [processId, revision, refreshToken]);
+
+  return (
+    <section className="config-history-panel">
+      <div className="config-history-panel-heading">
+        <div>
+          <h3>Configuration history</h3>
+          <p>Changed snapshots are retained locally by the BM2 daemon.</p>
+        </div>
+        <button
+          className="btn"
+          onClick={() => setRefreshToken((value) => value + 1)}
+          type="button"
+        >
+          Refresh
+        </button>
+      </div>
+      {loading ? <div className="config-history-empty">Loading history…</div> : null}
+      {error ? (
+        <div className="config-history-error" role="alert">
+          Could not load configuration history: {error}
+        </div>
+      ) : null}
+      {!loading && !error ? <ConfigHistoryTimeline history={history} /> : null}
+    </section>
+  );
+}
+
 function MetricsChart({ point }: { point: ChartPoint }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [history, setHistory] = useState<ChartPoint[]>([]);
@@ -1153,6 +1303,10 @@ function ProcessDetailPage({
           </button>
         </div>
       </section>
+      <ConfigurationHistoryPanel
+        processId={process.pm_id}
+        revision={process.startedAt}
+      />
       <LogsPanel
         expanded
         logBuffer={logBuffer}

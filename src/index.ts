@@ -44,6 +44,8 @@ import type {
 import { statusColor } from "./colors";
 import { liveWatchProcess, printProcessTable } from "./process-table";
 import Daemon from "./daemon";
+import { loadEcosystemConfigFile } from "./ecosystem-loader";
+import { formatConfigReloadNotice } from "./config-reload-notice";
 
 // ---------------------------------------------------------------------------
 // Ensure directory structure exists
@@ -223,37 +225,10 @@ class BM2CLI {
   // -------------------------------------------------------------------------
 
   async loadEcosystemConfig(filePath: string): Promise<EcosystemConfig> {
-    
-    const abs = resolve(filePath);
-    const file = Bun.file(abs);
-
-    if (!(await file.exists())) {
-      throw new Error(`Ecosystem file not found: ${abs}`);
-    }
-
-    const ext = extname(abs);
-    let config: EcosystemConfig;
-
-    if (ext === ".json") {
-      config = (await file.json()) as EcosystemConfig;
-    } else {
-      const mod = await import(abs);
-      config = (mod.default || mod) as EcosystemConfig;
-    }
-
-    const cwd = path.dirname(abs);
-    
+    const config = await loadEcosystemConfigFile(filePath);
     if (config.noDaemon) {
       this.noDaemon = config.noDaemon;
     }
-
-    config.apps = config.apps.map((i) => {
-      if ((i.cwd || "").trim() === "") {
-        i.cwd = cwd;
-      }
-      return i;
-    });
-
     return config;
   }
 
@@ -523,6 +498,9 @@ class BM2CLI {
     if (!res.success) {
       console.error(colorize(`Error: ${res.error}`, "red"));
       process.exit(1);
+    }
+    for (const notice of res.configReloads ?? []) {
+      console.log(colorize(formatConfigReloadNotice(notice), "cyan"));
     }
     printProcessTable(res.data);
   }

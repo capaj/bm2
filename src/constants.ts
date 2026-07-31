@@ -33,6 +33,7 @@ export const DUMP_FILE = join(BM2_HOME, "dump.json");
 export const METRICS_DIR = join(BM2_HOME, "metrics");
 export const MODULE_DIR = join(BM2_HOME, "modules");
 export const CONFIG_FILE = join(BM2_HOME, "config.json");
+export const CONFIG_HISTORY_DB_FILE = join(BM2_HOME, "config-history.sqlite");
 export const DASHBOARD_PORT = 9615;
 export const METRICS_PORT = 9616;
 

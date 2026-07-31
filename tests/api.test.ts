@@ -489,6 +489,23 @@ describe("BM2 API", () => {
     });
   });
 
+  describe("configHistory()", () => {
+    test("requests a bounded history for the target", async () => {
+      const history: never[] = [];
+      sendMock.mockResolvedValue(okResponse(history, "configHistory"));
+
+      const result = await bm2.configHistory("api", 25);
+
+      expect(result).toEqual(history);
+      expect(sendMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "configHistory",
+          data: { target: "api", limit: 25 },
+        })
+      );
+    });
+  });
+
   // ───────────────────── Logs ───────────────────────────────────────
 
   describe("logs()", () => {

@@ -36,6 +36,7 @@ import type {
   ProcessState,
   MetricSnapshot,
   ProcessStatus,
+  ConfigHistoryEntry,
 } from "./types";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -257,6 +258,18 @@ export class BM2 extends EventEmitter<BM2Events> {
     const res = await this.sendOrThrow({
       type: "describe",
       data: { target: String(target) },
+    });
+    return res.data;
+  }
+
+  /** Return newest-first configuration snapshots for a managed process. */
+  async configHistory(
+    target: string | number,
+    limit = 100
+  ): Promise<ConfigHistoryEntry[]> {
+    const res = await this.sendOrThrow({
+      type: "configHistory",
+      data: { target: String(target), limit },
     });
     return res.data;
   }

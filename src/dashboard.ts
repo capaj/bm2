@@ -308,6 +308,21 @@ export class Dashboard {
           return Response.json(this.pm.getMetricsHistory(seconds));
         }
 
+        if (url.pathname === "/api/config-history") {
+          const requestedTarget = url.searchParams.get("target");
+          if (!requestedTarget) {
+            return Response.json(
+              { error: "target is required" },
+              { status: 400 }
+            );
+          }
+          const target = /^\d+$/.test(requestedTarget)
+            ? Number(requestedTarget)
+            : requestedTarget;
+          const limit = Number(url.searchParams.get("limit") || 100);
+          return Response.json(this.pm.getConfigHistory(target, limit));
+        }
+
         if (url.pathname === "/api/prometheus" || url.pathname === "/metrics") {
           return new Response(this.pm.getPrometheusMetrics(), {
             headers: { "Content-Type": "text/plain; charset=utf-8" },

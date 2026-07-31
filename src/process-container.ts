@@ -20,6 +20,7 @@ import type {
   ProcessState,
   ProcessStatus,
   LogRotateOptions,
+  ConfigHistoryTrigger,
 } from "./types";
 import { LogManager } from "./log-manager";
 import { ClusterManager } from "./cluster-manager";
@@ -35,6 +36,11 @@ import {
 import type { ProcessUsage } from "./process-monitor";
 
 const MAX_UNTERMINATED_LOG_CHARS = 8 * 1024;
+
+export type BeforeProcessStart = (
+  container: ProcessContainer,
+  trigger: ConfigHistoryTrigger
+) => Promise<boolean | void>;
 
 export class ProcessContainer {
   public id: number;
@@ -61,6 +67,7 @@ export class ProcessContainer {
   private watcher: ReturnType<typeof import("fs").watch> | null = null;
   private logRotateInterval: ReturnType<typeof setInterval> | null = null;
   private isRestarting: boolean = false;
+  private beforeStart?: BeforeProcessStart;
 
   constructor(
     id: number,
@@ -68,7 +75,8 @@ export class ProcessContainer {
     logManager: LogManager,
     clusterManager: ClusterManager,
     healthChecker: HealthChecker,
-    cronManager: CronManager
+    cronManager: CronManager,
+    beforeStart?: BeforeProcessStart
   ) {
     this.id = id;
     this.name = config.name;
@@ -77,10 +85,19 @@ export class ProcessContainer {
     this.clusterManager = clusterManager;
     this.healthChecker = healthChecker;
     this.cronManager = cronManager;
+    this.beforeStart = beforeStart;
     this.createdAt = Date.now();
   }
 
-  async start(): Promise<void> {
+  async start(trigger: ConfigHistoryTrigger = "automatic-restart"): Promise<void> {
+    let shouldStart: boolean | void;
+    try {
+      shouldStart = await this.beforeStart?.(this, trigger);
+    } catch (error) {
+      this.status = "errored";
+      throw error;
+    }
+    if (shouldStart === false) return;
     if (this.status === "online") return;
 
     this.status = "launching";
@@ -135,7 +152,7 @@ export class ProcessContainer {
           },
           (_id, reason) => {
             console.log(`[bm2] Health check failed for ${this.name}: ${reason}`);
-            this.restart();
+            this.restart("health-check");
           }
         );
       }
@@ -144,7 +161,7 @@ export class ProcessContainer {
       if (this.config.cronRestart) {
         this.cronManager.schedule(this.id, this.config.cronRestart, () => {
           console.log(`[bm2] Cron restart triggered for ${this.name}`);
-          this.restart();
+          this.restart("cron");
         });
       }
     } catch (err: any) {
@@ -311,7 +328,7 @@ export class ProcessContainer {
             if (debounceTimer) clearTimeout(debounceTimer);
             debounceTimer = setTimeout(() => {
               console.log(`[bm2] ${filename} changed, restarting ${this.name}...`);
-              this.restart();
+              this.restart("watch");
             }, 1000);
           }
         );
@@ -350,7 +367,7 @@ export class ProcessContainer {
           `[bm2] Restarting ${this.name} (restart ${this.restartCount}, ` +
           `unstable ${this.unstableRestarts}/${this.config.maxRestarts})`
         );
-        this.start().catch((err) => {
+        this.start("automatic-restart").catch((err) => {
           console.error(`[bm2] Failed to restart ${this.name}:`, err);
         });
       }, delay);
@@ -435,16 +452,16 @@ export class ProcessContainer {
     this.cpu = 0;
   }
 
-  async restart(): Promise<void> {
+  async restart(trigger: ConfigHistoryTrigger = "restart"): Promise<void> {
     this.isRestarting = true;
     const wasAutoRestart = this.config.autorestart;
     await this.stop();
     this.config.autorestart = wasAutoRestart;
     this.isRestarting = false;
-    await this.start();
+    await this.start(trigger);
   }
 
-  async reload(): Promise<void> {
+  async reload(trigger: ConfigHistoryTrigger = "reload"): Promise<void> {
     const oldPid = this.pid;
     const oldProcess = this.process;
 
@@ -452,7 +469,7 @@ export class ProcessContainer {
     this.process = null;
     this.pid = undefined;
 
-    await this.start();
+    await this.start(trigger);
 
     // Wait for new process to be stable
     await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -475,6 +492,11 @@ export class ProcessContainer {
     if (this.pid) {
       process.kill(this.pid, signal as any);
     }
+  }
+
+  updateConfig(config: ProcessDescription): void {
+    this.config = config;
+    this.name = config.name;
   }
 
   getState(): ProcessState {
@@ -541,7 +563,7 @@ export class ProcessContainer {
       console.log(
         `[bm2] ${this.name} exceeded memory limit (${this.memory} > ${this.config.maxMemoryRestart}), restarting...`
       );
-      await this.restart();
+      await this.restart("memory-limit");
     }
   }
 
