@@ -1039,6 +1039,17 @@ Check if the daemon is running.
 bm2 ping
 ```
 
+#### bm2 daemon reload
+
+Restart the BM2 daemon itself. BM2 waits for the old daemon to exit and for a
+responsive replacement before returning. When the daemon is the main process
+of a systemd service, BM2 saves the current process list and lets systemd
+restart it, including units configured with `Restart=on-failure`.
+
+```
+bm2 daemon reload
+```
+
 #### bm2 kill
 
 Stop all processes and kill the daemon.

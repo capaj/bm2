@@ -15,7 +15,7 @@
  * Author: Zak <zak@maxxpainn.com>
  */
 
-import { existsSync, readFileSync, unlinkSync } from "fs";
+import { existsSync, unlinkSync } from "fs";
 import path, { resolve, join, extname } from "path";
 import {
   APP_NAME,
@@ -46,6 +46,15 @@ import { liveWatchProcess, printProcessTable } from "./process-table";
 import Daemon from "./daemon";
 import { loadEcosystemConfigFile } from "./ecosystem-loader";
 import { formatConfigReloadNotice } from "./config-reload-notice";
+import {
+  getSystemdServiceName,
+  isProcessAlive,
+  probeDaemon,
+  readDaemonPid,
+  removeStaleDaemonFiles,
+  waitForDaemonReady,
+  waitForProcessExit,
+} from "./daemon-lifecycle";
 
 // ---------------------------------------------------------------------------
 // Ensure directory structure exists
@@ -65,19 +74,23 @@ class BM2CLI {
   // -------------------------------------------------------------------------
 
   isDaemonRunning(): boolean {
-    if (!existsSync(DAEMON_PID_FILE)) return false;
-    try {
-      const pid = parseInt(readFileSync(DAEMON_PID_FILE, "utf-8").trim());
-      process.kill(pid, 0);
-      return true;
-    } catch {
-      return false;
-    }
+    const pid = readDaemonPid();
+    return pid !== null && isProcessAlive(pid);
   }
 
   async startDaemon(): Promise<void> {
-    
-    if (this.isDaemonRunning()) return;
+    if (await probeDaemon()) return;
+
+    const existingPid = readDaemonPid();
+    if (existingPid && isProcessAlive(existingPid)) {
+      if (await waitForDaemonReady(5_000)) return;
+      throw new Error(
+        `Daemon PID ${existingPid} is running but its socket is not responding. ` +
+        `Check ${DAEMON_ERR_LOG_FILE}.`
+      );
+    }
+
+    removeStaleDaemonFiles();
 
     const daemonScript = join(import.meta.dir, "daemon.ts");
     const bunPath = Bun.which("bun") || "bun";
@@ -98,31 +111,28 @@ class BM2CLI {
 
     console.error(colorize("Starting daemon..", "green"));
 
-    for (let i = 0; i < 100; i++) {
-      if (this.isDaemonRunning()) return;
-      await Bun.sleep(1_000);
-      console.error(colorize("Waiting for daemon..", "cyan"));
-    }
+    if (await waitForDaemonReady(5_000)) return;
 
-    if (!this.isDaemonRunning()) {
-      throw new Error("Daemon failed to start (socket not found after 5 s)");
-    }
+    throw new Error(
+      "Daemon failed to become responsive after 5 seconds. " +
+      `Check ${DAEMON_ERR_LOG_FILE}.`
+    );
   }
 
-  async stopDaemon(): Promise<void> {
-    try {
-      if (!this.isDaemonRunning()) return;
-
-      const pidText = await Bun.file(DAEMON_PID_FILE).text();
-      const pid = Number(pidText);
-
-      process.kill(pid, "SIGTERM");
-      console.error("Daemon stopped");
-
-      await Bun.write(DAEMON_PID_FILE, "");
-    } catch (err) {
-      console.error("Failed to stop daemon:", err);
+  async stopDaemon(signal: NodeJS.Signals = "SIGTERM"): Promise<number | null> {
+    const pid = await probeDaemon() ?? readDaemonPid();
+    if (!pid || !isProcessAlive(pid)) {
+      removeStaleDaemonFiles();
+      return null;
     }
+
+    process.kill(pid, signal);
+    if (!(await waitForProcessExit(pid, 10_000))) {
+      throw new Error(`Timed out waiting for daemon PID ${pid} to stop`);
+    }
+
+    console.error("Daemon stopped");
+    return pid;
   }
 
   async sendToDaemon(msg: DaemonMessage): Promise<DaemonResponse> {
@@ -1027,8 +1037,36 @@ class BM2CLI {
         process.exit(0);
         break;
       case "reload":
-        await this.stopDaemon();
-        await this.startDaemon();
+        {
+          const currentPid = await probeDaemon() ?? readDaemonPid();
+          const systemdService = currentPid ? getSystemdServiceName(currentPid) : null;
+
+          // SIGUSR2 is an intentional failure exit for a systemd-supervised
+          // daemon, so both Restart=on-failure and Restart=always units bring
+          // it back. Save first so ExecStartPost can resurrect current state.
+          if (systemdService) {
+            const saved = await this.sendToDaemon({ type: "save" });
+            if (!saved.success) {
+              throw new Error(saved.error || "Failed to save processes before daemon reload");
+            }
+          }
+
+          const previousPid = await this.stopDaemon(systemdService ? "SIGUSR2" : "SIGTERM");
+          const supervisorWaitMs = systemdService ? 10_000 : 1_500;
+          const replacementPid = previousPid
+            ? await waitForDaemonReady(supervisorWaitMs, previousPid)
+            : null;
+
+          if (!replacementPid) {
+            if (systemdService) {
+              throw new Error(
+                `The systemd service ${systemdService} did not restart BM2. ` +
+                `Run: sudo systemctl restart ${systemdService}`
+              );
+            }
+            await this.startDaemon();
+          }
+        }
         process.exit(0);
         break;
       default:

@@ -19,13 +19,13 @@ import { Dashboard } from "./dashboard";
 import { ModuleManager } from "./module-manager";
 import {
   DAEMON_SOCKET,
-  DAEMON_PID_FILE,
   DASHBOARD_PORT,
   METRICS_PORT,
 } from "./constants";
 import { ensureDirs } from "./utils";
 import type { DaemonMessage, DaemonResponse } from "./types";
 import type { ReadableStreamController, Server } from "bun";
+import { claimDaemonPidFile, removeOwnedDaemonFiles } from "./daemon-lifecycle";
 
 
 export default class Daemon {
@@ -65,16 +65,13 @@ export default class Daemon {
     this.debugMode = this.args.includes("--debug");
 
     if (_daemonEnabled) {
-
+      // Claim ownership before deleting a stale socket. This prevents the CLI
+      // and an external supervisor from racing two daemon instances.
+      claimDaemonPidFile();
       const sock = Bun.file(DAEMON_SOCKET);
-
-      // Clean up existing socket
       if (await sock.exists()) {
         try { await sock.delete(); } catch {}
       }
-
-      // Write PID file
-      await Bun.write(DAEMON_PID_FILE, String(process.pid));
 
     }
 
@@ -361,6 +358,12 @@ export default class Daemon {
 // ── Entrypoint (spawned by CLI) ───────────────────────────────────────────
 if (import.meta.main) {
   const dm = new Daemon();
+  const cleanup = () => removeOwnedDaemonFiles();
+  process.on("exit", cleanup);
+  process.on("SIGTERM", () => process.exit(0));
+  process.on("SIGINT", () => process.exit(0));
+  // A non-zero exit lets a systemd unit with Restart=on-failure restart BM2.
+  process.on("SIGUSR2", () => process.exit(75));
   await dm.initialize();           // initialize first — writes PID, sets up pm/dashboard
   const s = dm.startServer();      // then bind the socket
   console.log(`Daemon listening on ${s.url}`);
